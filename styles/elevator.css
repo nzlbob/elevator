@@ -1,0 +1,130 @@
+/* Elevator Panel base styles and themes */
+.elevator-panel {
+	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.elevator-panel .panel-topbar {
+	display: flex;
+	justify-content: flex-end;
+	margin-bottom: 8px;
+}
+.elevator-panel .panel-topbar .panel-edit {
+	padding: 4px 8px;
+}
+.elevator-panel .panel-section { margin-bottom: 12px; }
+.elevator-panel .panel-title { font-weight: 600; margin-bottom: 6px; }
+.elevator-panel .level-list { list-style: none; padding: 0; margin: 8px 0; }
+.elevator-panel .level-list li { margin: 4px 0; }
+.elevator-panel button { padding: 6px 10px; }
+
+.elevator-panel .level-btn.is-current {
+	border: 2px solid var(--color-border-positive, #2e8b57);
+	color: var(--color-text-positive, #2e8b57);
+}
+
+.elevator-panel .hidden { display: none; }
+
+.elevator-panel .config-tabs {
+	display: flex;
+	gap: 6px;
+	margin: 0 0 6px 0;
+}
+.elevator-panel .config-tabs .tab-btn {
+	flex: 1;
+	padding: 4px 6px;
+	border: 1px solid var(--color-border-light-2, #bbb);
+	border-radius: 6px;
+	background: transparent;
+}
+.elevator-panel .config-tabs .tab-btn.active {
+	background: var(--color-bg-btn, rgba(0,0,0,0.05));
+}
+
+.elevator-panel .elevator-config-form .form-group {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 4px;
+	margin: 6px 0;
+}
+.elevator-panel .elevator-config-form .form-group label { font-size: 12px; opacity: 0.9; }
+.elevator-panel .elevator-config-form .form-fields input,
+.elevator-panel .elevator-config-form .form-fields select {
+	width: 100%;
+}
+
+.elevator-panel .icon-picker {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 48px;
+	height: 48px;
+	border: 1px solid var(--color-border-light-2, #bbb);
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--color-bg, rgba(0,0,0,0.03));
+	cursor: pointer;
+}
+.elevator-panel .icon-picker .icon-preview {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+.elevator-panel .levels-editor { margin-top: 10px; }
+.elevator-panel .levels-rows { display: flex; flex-direction: column; gap: 6px; }
+.elevator-panel .level-row {
+	display: grid;
+	grid-template-columns: auto 2fr 1fr auto;
+	gap: 6px;
+	align-items: center;
+}
+.elevator-panel .level-row .drag-handle {
+	user-select: none;
+	cursor: grab;
+	padding: 0 4px;
+	opacity: 0.75;
+}
+.elevator-panel .level-row.dragging { opacity: 0.5; }
+
+.elevator-panel .icon-btn {
+	padding: 4px 8px;
+	min-width: 32px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+}
+.elevator-panel .levels-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+	margin-top: 8px;
+}
+.elevator-panel .icon-btn:disabled { opacity: 0.5; }
+.elevator-panel .sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+.elevator-panel .config-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+	margin-top: 10px;
+}
+
+.elevator-panel.light { --fg: #222; --bg: #fff; }
+.elevator-panel.dark { --fg: #eee; --bg: #1f2330; }
+.elevator-panel.scifi { --fg: #d6f3ff; --bg: #0b1a24; }
+.elevator-panel.fantasy { --fg: #2b1a10; --bg: #f2ead6; }
+
+.elevator-panel { color: var(--fg); background: var(--bg); border-radius: 6px; }
+.elevator-config { border: 1px solid var(--color-border, #888); padding: 8px; margin-top: 8px; }
+

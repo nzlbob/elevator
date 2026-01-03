@@ -1,0 +1,104 @@
+{
+	"elevator": {
+		"panel": {
+			"title": "Elevator",
+			"callTitle": "Call Elevator",
+			"callButton": "Call",
+			"callHint": "Elevator will arrive in {seconds} seconds",
+			"selectTitle": "Select Level",
+			"noLevels": "No levels configured",
+			"edit": "Edit",
+			"doneEditing": "Done",
+			"configTitle": "Elevator Configuration",
+			"levelsTitle": "Levels",
+			"addLevel": "Add Level",
+			"remove": "Remove",
+			"save": "Save",
+			"cancel": "Cancel",
+			"iconAlwaysOn": "Show Icon Always",
+			"tabSettings": "Settings",
+			"tabLevels": "Levels",
+			"dragToReorder": "Drag to reorder",
+			"iconPick": "Click to choose image",
+			"bulkAdd": "Add Many",
+			"bulkAddTitle": "Add Regions",
+			"bulkAddHint": "Select one or more Regions to add as elevator stops.",
+			"bulkAddConfirm": "Add Selected"
+		},
+		"warn": {
+			"noElevatorId": "Elevator ID not set on this Region.",
+			"noDestination": "No destination selected.",
+			"noTokensInRegion": "No tokens in the elevator Region.",
+			"teleportUnavailable": "Teleport unavailable for this destination."
+		},
+		"info": {
+			"waitNextRound": "Waiting until next round to enable elevator...",
+			"sentGMRequest": "Request sent to GM for non-owned tokens.",
+			"sentOwnerRequest": "Request sent for owner approval of non-owned tokens."
+		},
+		"error": {
+			"invalidDestination": "Invalid destination Region UUID."
+		},
+		"gm": {
+			"approvalTitle": "Approve Group Teleport",
+			"approvalPrompt": "Approve teleporting tokens to the selected destination?"
+		},
+		"settings": {
+			"theme": {
+				"name": "Elevator Panel Theme",
+				"hint": "Choose the default theme for the Elevator panel."
+			},
+			"arrivalDelay": {
+				"name": "Arrival Delay (ms)",
+				"hint": "Delay from calling elevator to arrival when not in combat."
+			},
+			"combatDelay": {
+				"name": "Combat Delay Policy",
+				"hint": "When tokens are combatants, wait until next round before enabling selection."
+			},
+			"requireGM": {
+				"name": "Always Require GM Approval",
+				"hint": "If enabled, any group teleport requires GM approval even for owned tokens."
+			},
+			"sfx": {
+				"name": "Enable Elevator SFX",
+				"hint": "Play optional SFX for call and arrival."
+			},
+			"worldState": {
+				"name": "Elevator World State"
+			},
+			"linksState": {
+				"name": "Elevator Links"
+			}
+		},
+		"regionConfig": {
+			"tab": {
+				"label": "Elevator"
+			},
+			"enabled": {
+				"label": "Enable Elevator",
+				"hint": "Turn this Region into an elevator source."
+			},
+			"elevatorId": {
+				"label": "Elevator ID",
+				"hint": "Identifier linking Regions across scenes for the same elevator."
+			},
+			"isHere": {
+				"label": "Elevator Is Here",
+				"hint": "Mark the elevator as currently present at this Region."
+			},
+			"icon": {
+				"label": "Elevator Icon",
+				"hint": "Custom image for the elevator overlay icon."
+			},
+			"iconSize": {
+				"label": "Icon Size",
+				"hint": "Pixel size for the elevator icon."
+			},
+			"theme": {
+				"label": "Panel Theme",
+				"hint": "Theme for the elevator panel at this Region."
+			}
+		}
+	}
+}

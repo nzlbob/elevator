@@ -1,0 +1,157 @@
+<div class="elevator-panel {{themeClass}}">
+  {{#if isGM}}
+    <div class="panel-topbar">
+      <button type="button" class="panel-edit" data-action="toggle-edit">
+        {{#if editMode}}
+          {{localize "elevator.panel.doneEditing"}}
+        {{else}}
+          {{localize "elevator.panel.edit"}}
+        {{/if}}
+      </button>
+    </div>
+  {{/if}}
+
+  <div class="elevator-panel-body">
+
+    {{#if editMode}}
+      <form class="elevator-config-form" autocomplete="off">
+        <datalist id="elevator-region-uuids">
+          {{#each regionUuidOptions}}
+            <option value="{{this.label}}" data-value="{{this.uuid}}" data-region="{{this.regionName}}"></option>
+          {{/each}}
+        </datalist>
+
+        <nav class="config-tabs" aria-label="Elevator Config Tabs">
+          <button type="button" class="tab-btn {{#if (eq configTab "settings")}}active{{/if}}" data-action="set-config-tab" data-tab="settings">
+            {{localize "elevator.panel.tabSettings"}}
+          </button>
+          <button type="button" class="tab-btn {{#if (eq configTab "levels")}}active{{/if}}" data-action="set-config-tab" data-tab="levels">
+            {{localize "elevator.panel.tabLevels"}}
+          </button>
+        </nav>
+
+        <div class="panel-section config-tab config-tab-settings {{#unless (eq configTab "settings")}}hidden{{/unless}}">
+          <div class="panel-title">{{localize "elevator.panel.configTitle"}}</div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.enabled.label"}}</label>
+            <div class="form-fields">
+              <input type="checkbox" name="enabled" {{checked config.enabled}}>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.elevatorId.label"}}</label>
+            <div class="form-fields">
+              <input type="text" name="elevatorId" value="{{config.elevatorId}}">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.isHere.label"}}</label>
+            <div class="form-fields">
+              <input type="checkbox" name="isElevatorHere" {{checked config.isElevatorHere}}>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.theme.label"}}</label>
+            <div class="form-fields">
+              <select name="theme">
+                <option value="light" {{#if (eq config.theme "light")}}selected{{/if}}>Light</option>
+                <option value="dark" {{#if (eq config.theme "dark")}}selected{{/if}}>Dark</option>
+                <option value="scifi" {{#if (eq config.theme "scifi")}}selected{{/if}}>Sci-Fi</option>
+                <option value="fantasy" {{#if (eq config.theme "fantasy")}}selected{{/if}}>Fantasy</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.icon.label"}}</label>
+            <div class="form-fields">
+              <input type="hidden" name="iconSrc" value="{{config.iconSrc}}">
+              <div class="icon-picker" data-action="pick-icon" title="{{localize "elevator.panel.iconPick"}}">
+                <img class="icon-preview" src="{{config.iconSrc}}" alt="{{localize "elevator.regionConfig.icon.label"}}">
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.regionConfig.iconSize.label"}}</label>
+            <div class="form-fields">
+              <input type="number" name="iconSize" value="{{config.iconSize}}" min="24" step="1">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>{{localize "elevator.panel.iconAlwaysOn"}}</label>
+            <div class="form-fields">
+              <input type="checkbox" name="iconAlwaysOn" {{checked config.iconAlwaysOn}}>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="panel-section config-tab config-tab-levels {{#unless (eq configTab "levels")}}hidden{{/unless}}">
+          <div class="panel-title">{{localize "elevator.panel.levelsTitle"}}</div>
+          <div class="levels-rows">
+            {{#each config.levels}}
+              <div class="level-row">
+                <span class="drag-handle" draggable="true" title="{{localize "elevator.panel.dragToReorder"}}">⋮⋮</span>
+                <input type="hidden" name="levelUuid" value="{{this.uuid}}">
+                <input type="text" name="levelUuidLabel" value="{{this.uuidLabel}}" placeholder="Scene ⇒ Region" list="elevator-region-uuids" {{#if this.isCurrent}}disabled{{/if}}>
+                <input type="text" name="levelLabel" value="{{this.label}}" placeholder="Label">
+                <button type="button" class="icon-btn level-remove" data-action="remove-level" {{#if this.isCurrent}}disabled{{/if}} title="{{localize "elevator.panel.remove"}}">
+                  <i class="fas fa-trash" aria-hidden="true"></i>
+                </button>
+              </div>
+            {{/each}}
+          </div>
+
+          <div class="levels-actions">
+            <button type="button" class="icon-btn" data-action="bulk-add-levels" title="{{localize "elevator.panel.bulkAdd"}}">
+              <i class="fas fa-list-check" aria-hidden="true"></i>
+              <span class="sr-only">{{localize "elevator.panel.bulkAdd"}}</span>
+            </button>
+
+            <button type="button" class="icon-btn level-add" data-action="add-level" title="{{localize "elevator.panel.addLevel"}}">
+            <i class="fas fa-plus" aria-hidden="true"></i>
+            <span class="sr-only">{{localize "elevator.panel.addLevel"}}</span>
+            </button>
+          </div>
+        </div>
+
+          <div class="config-actions">
+            <button type="button" data-action="save-config">{{localize "elevator.panel.save"}}</button>
+            <button type="button" data-action="cancel-config">{{localize "elevator.panel.cancel"}}</button>
+          </div>
+      </form>
+    {{else}}
+
+    {{#if isHere}}
+      <div class="panel-section">
+        <div class="panel-title">{{localize "elevator.panel.selectTitle"}}</div>
+        <ul class="level-list">
+          {{#if levels.length}}
+            {{#each levels}}
+              <li>
+                <button type="button" class="level-btn {{#if this.isCurrent}}is-current{{/if}}" data-action="select" data-uuid="{{this.uuid}}">{{this.label}}</button>
+              </li>
+            {{/each}}
+          {{else}}
+            <li>{{localize "elevator.panel.noLevels"}}</li>
+          {{/if}}
+        </ul>
+      </div>
+    {{else}}
+      <div class="panel-section">
+        <div class="panel-title">{{localize "elevator.panel.callTitle"}}</div>
+        <button type="button" data-action="call">{{localize "elevator.panel.callButton"}}</button>
+        <div class="panel-hint">{{localize "elevator.panel.callHint" seconds=arrivalSeconds}}</div>
+      </div>
+    {{/if}}
+
+    {{/if}}
+
+  </div>
+</div>
