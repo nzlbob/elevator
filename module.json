@@ -1,0 +1,61 @@
+{
+"id": "elevator",
+  "title": "The Elevator",
+  "description": "This module Make elevators",
+
+  "authors": [
+    {
+      "name": "bob",
+      "flags": {}
+    }
+  ],
+  "version": "0.01",
+  "compatibility": {
+    "minimum": "10",
+    "verified": "13",
+    "maximum": "13"
+  },
+    "esmodules": [
+    "modules/elevator.js"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    }
+    
+  ],   
+     "flags": {},
+      "banner": "modules/elevator/images/system/pactWorlds.webp",
+
+
+  "styles": [
+    "styles/elevator.css"
+  ],
+  "url": "https://github.com/nzlbob/elevator",
+  "manifest": "https://raw.githubusercontent.com/nzlbob/elevator/refs/heads/main/module.json",
+  "download": "https://github.com/nzlbob/elevator/archive/refs/heads/main.zip",
+  "media": [
+    {
+      "type": "thumbnail",
+      "url": "modules/sfrpg-galactic-trade/images/galactic-trade.webp",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "setup",
+      "url": "modules/sfrpg-galactic-trade/images/galactic-trade.webp",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "cover",
+      "url": "https://raw.githubusercontent.com/nzlbob/sfrpg-galactic-trade/main/images/galactic-trade.webp",
+      "caption": "Elevator",
+      "loop": false,
+      "flags": {}
+    }
+  ]
+}
