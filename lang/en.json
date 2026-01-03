@@ -64,6 +64,10 @@
 				"name": "Enable Elevator SFX",
 				"hint": "Play optional SFX for call and arrival."
 			},
+			"debug": {
+				"name": "Elevator Debug Logging",
+				"hint": "Log extra elevator state to the browser console (F12)."
+			},
 			"worldState": {
 				"name": "Elevator World State"
 			},

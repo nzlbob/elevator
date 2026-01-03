@@ -11,6 +11,7 @@ const SETTINGS = {
   CombatDelayPolicy: "combatDelayPolicy", // next-round
   RequireGMForAll: "requireGMForAll", // if true, always require GM approval
   SfxEnabled: "sfxEnabled",
+  Debug: "debug",
 };
 
 const DEFAULTS = {
@@ -19,6 +20,7 @@ const DEFAULTS = {
   combatDelayPolicy: "next-round",
   requireGMForAll: false,
   sfxEnabled: true,
+  debug: false,
 };
 
 // World store for current elevator level per elevatorId
@@ -29,9 +31,120 @@ const WORLD_STATE = {
 
 const REGION_LABEL_SPACING = " \u21D2 "; // Rightwards Double Arrow
 
+// Players cannot update world settings, and the replication of a world-setting change can lag a tick.
+// Keep an optimistic client-side cache so the panel can update immediately.
+const CLIENT_STATE = {
+  currentLevelByElevatorId: {}
+};
+
+function getKnownCurrentLevelUuid(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return "";
+  // Prefer the optimistic cache: world-setting propagation can lag for players.
+  const cached = String(CLIENT_STATE.currentLevelByElevatorId?.[elevId] || "").trim();
+  if (cached) return cached;
+  const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
+  return String(currentById?.[elevId] || "").trim();
+}
+
+function isDebugEnabled() {
+  try { return !!game.settings.get(MOD_ID, SETTINGS.Debug); } catch (e) { return false; }
+}
+
+function dlog(...args) {
+  if (!isDebugEnabled()) return;
+  log("[debug]", ...args);
+}
+
+function requestSyncCurrentLevel(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return;
+  if (game.user?.isGM) return;
+  game.socket.emit(`module.${MOD_ID}.getCurrentLevel`, { elevatorId: elevId, requester: game.user?.id });
+}
+
+async function requestSetCurrentLevel(elevatorId, regionUuid) {
+  const elevId = String(elevatorId ?? "").trim();
+  const uuid = String(regionUuid ?? "").trim();
+  if (!elevId || !uuid) return;
+
+  // Optimistically update local state so UIs can respond immediately.
+  CLIENT_STATE.currentLevelByElevatorId[elevId] = uuid;
+  dlog("requestSetCurrentLevel optimistic", { elevId, uuid, user: game.user?.name });
+  try { queueRerenderOpenElevatorPanels(elevId); } catch (e) { /* ignore */ }
+
+  if (game.user?.isGM) {
+    const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
+    currentById[elevId] = uuid;
+    await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
+
+    // Also broadcast for immediate client updates.
+    game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
+    return;
+  }
+
+  // Players cannot update world settings; request the GM to do it.
+  game.socket.emit(`module.${MOD_ID}.setCurrentLevel`, { elevatorId: elevId, regionUuid: uuid, requester: game.user?.id });
+}
+
 // Simple logger
 function log(...args) { console.log(`[${MOD_ID}]`, ...args); }
 function warn(...args) { console.warn(`[${MOD_ID}]`, ...args); }
+
+async function playDoorSfxAndWait() {
+  try {
+    if (!game.settings.get(MOD_ID, SETTINGS.SfxEnabled)) return;
+
+    // Use Foundry's built-in door sounds. Paths can vary slightly by version/system;
+    // try a small set of common core asset paths.
+    const candidates = [
+      "sounds/doors/futuristic/close-fast.ogg",
+      "sounds/doors/sliding/close.ogg"
+    ];
+
+    for (const src of candidates) {
+      const ok = await playOneShotSfxAndWait(src, { volume: 0.8, fallbackMs: 750 });
+      if (ok) return;
+    }
+  } catch (e) {
+    // Never block teleportation due to SFX.
+  }
+}
+
+function playOneShotSfxAndWait(src, { volume = 0.8, fallbackMs = 750 } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok = true) => {
+      if (done) return;
+      done = true;
+      resolve(ok);
+    };
+
+    try {
+      const maybeSound = foundry.audio.AudioHelper.play({ src, volume, autoplay: true, loop: false }, true);
+      Promise.resolve(maybeSound).then((soundObj) => {
+        const howl = soundObj?.sound ?? soundObj;
+
+        // Resolve when the sound ends, or if it fails to load/play.
+        if (howl?.once) {
+          howl.once("end", () => finish(true));
+          howl.once("loaderror", () => finish(false));
+          howl.once("playerror", () => finish(false));
+        }
+
+        // Fallback timeout (or use duration if available).
+        let ms = fallbackMs;
+        try {
+          const dur = typeof howl?.duration === "function" ? howl.duration() : null;
+          if (dur && Number.isFinite(dur) && dur > 0) ms = Math.ceil(dur * 1000) + 25;
+        } catch (e) { /* ignore */ }
+        setTimeout(() => finish(true), ms);
+      }).catch(() => setTimeout(() => finish(false), fallbackMs));
+    } catch (e) {
+      setTimeout(() => finish(false), fallbackMs);
+    }
+  });
+}
 
 // Utility: safely get our namespace flags on a RegionDocument
 function getElevatorFlags(doc) {
@@ -165,6 +278,9 @@ async function syncElevatorNetwork(elevatorId, { homeUuid } = {}) {
     const nextFlags = foundry.utils.mergeObject(current, {
       enabled: true,
       elevatorId,
+      // Ensure only one stop advertises "Elevator Is Here" (used only as an initial fallback).
+      // The authoritative location is WORLD_STATE.CurrentLevelByElevatorId.
+      isElevatorHere: stop.uuid === home,
       theme: master.theme,
       iconSrc: master.iconSrc,
       iconSize: master.iconSize,
@@ -513,14 +629,19 @@ class ElevatorPanel extends Application {
     try {
       this.options.title = game.i18n.localize(`${MOD_ID}.panel.title`);
     } catch (e) { /* ignore */ }
+
+    // Players may have stale world-setting state; ask the GM for the current elevator location.
+    try { requestSyncCurrentLevel(this.flags.elevatorId); } catch (e) { /* ignore */ }
   }
 
   _deriveState() {
     const elevId = this.flags.elevatorId;
-    const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
-    const currentUUID = currentById[elevId];
+    const currentUUID = getKnownCurrentLevelUuid(elevId);
     const hereUUID = this.region.document.uuid;
-    const isHere = (currentUUID === hereUUID) || !!this.flags.isElevatorHere;
+    const isHere = currentUUID
+      ? (currentUUID === hereUUID)
+      : !!this.flags.isElevatorHere;
+    dlog("deriveState", { elevId, hereUUID, currentUUID, isHere, user: game.user?.name });
     return {
       isHere,
     };
@@ -541,8 +662,7 @@ class ElevatorPanel extends Application {
 
     const elevId = this.flags.elevatorId;
     const hereUUID = this.region.document.uuid;
-    const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
-    const currentCabUUID = String(currentById?.[elevId] || "").trim() || (this.flags.isElevatorHere ? hereUUID : "");
+    const currentCabUUID = getKnownCurrentLevelUuid(elevId) || (this.flags.isElevatorHere ? hereUUID : "");
 
     // The Select Level list should show all levels (including current), and highlight the current.
     const rawStops = Array.isArray(master?.stops)
@@ -1086,10 +1206,8 @@ class ElevatorPanel extends Application {
       await new Promise(r => setTimeout(r, delayMs));
     }
 
-    // Update world state to mark elevator is at this Region
-    const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
-    currentById[elevId] = this.region.document.uuid;
-    await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
+    // Update world state to mark elevator is at this Region (GM via socket for players).
+    await requestSetCurrentLevel(elevId, this.region.document.uuid);
 
     // Rerender as Select Level
     this._elevatorState = this._deriveState();
@@ -1109,6 +1227,9 @@ class ElevatorPanel extends Application {
 
     const tokens = tokensInsideRegion(this.region);
     if (!tokens.length) return ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.noTokensInRegion`));
+
+    // Play SFX first, then teleport after it finishes.
+    await playDoorSfxAndWait();
 
     const requireAllGM = !!game.settings.get(MOD_ID, SETTINGS.RequireGMForAll);
     const owned = [], notOwned = [];
@@ -1149,14 +1270,9 @@ class ElevatorPanel extends Application {
       await dest.parent.view();
     }
 
-    // Update world state so the elevator is now at the destination stop.
+    // Update world state so the elevator is now at the destination stop (GM via socket for players).
     try {
-      const elevId = this.flags.elevatorId;
-      if (elevId) {
-        const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
-        currentById[elevId] = destUUID;
-        await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
-      }
+      await requestSetCurrentLevel(this.flags.elevatorId, destUUID);
     } catch (e) { /* ignore */ }
 
     // Rebind this panel to the destination region so subsequent selections operate on the new location.
@@ -1179,6 +1295,32 @@ function openElevatorPanel(region) {
   panel.render(true);
 }
 
+function rerenderOpenElevatorPanels(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return;
+  try {
+    for (const app of Object.values(ui.windows || {})) {
+      if (!(app instanceof ElevatorPanel)) continue;
+      const appElevId = String(app?.flags?.elevatorId ?? "").trim();
+      if (appElevId !== elevId) continue;
+      app._elevatorState = app._deriveState();
+      app.render(false);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+const _rerenderTimersByElevId = new Map();
+function queueRerenderOpenElevatorPanels(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return;
+  const prev = _rerenderTimersByElevId.get(elevId);
+  if (prev) clearTimeout(prev);
+  _rerenderTimersByElevId.set(elevId, setTimeout(() => {
+    _rerenderTimersByElevId.delete(elevId);
+    rerenderOpenElevatorPanels(elevId);
+  }, 50));
+}
+
 // Socket handling (GM-side)
 function registerSocket() {
   game.socket.on(`module.${MOD_ID}.teleportRequest`, async payload => {
@@ -1199,6 +1341,54 @@ function registerSocket() {
       }
     } catch (e) {
       warn("Socket teleportRequest error", e);
+    }
+  });
+
+  game.socket.on(`module.${MOD_ID}.setCurrentLevel`, async payload => {
+    if (!game.user?.isGM) return;
+    try {
+      const elevId = String(payload?.elevatorId ?? "").trim();
+      const uuid = String(payload?.regionUuid ?? "").trim();
+      if (!elevId || !uuid) return;
+
+      dlog("GM setCurrentLevel", { elevId, uuid, requester: payload?.requester });
+
+      const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
+      currentById[elevId] = uuid;
+      await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
+
+      // Broadcast so all clients update immediately (players can't read/write world settings synchronously).
+      game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
+    } catch (e) {
+      warn("Socket setCurrentLevel error", e);
+    }
+  });
+
+  game.socket.on(`module.${MOD_ID}.getCurrentLevel`, async payload => {
+    if (!game.user?.isGM) return;
+    try {
+      const elevId = String(payload?.elevatorId ?? "").trim();
+      if (!elevId) return;
+      const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
+      const uuid = String(currentById?.[elevId] || "").trim();
+      dlog("GM getCurrentLevel", { elevId, uuid, requester: payload?.requester });
+      if (!uuid) return;
+      game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
+    } catch (e) {
+      warn("Socket getCurrentLevel error", e);
+    }
+  });
+
+  game.socket.on(`module.${MOD_ID}.currentLevelChanged`, async payload => {
+    try {
+      const elevId = String(payload?.elevatorId ?? "").trim();
+      const uuid = String(payload?.regionUuid ?? "").trim();
+      if (!elevId || !uuid) return;
+      dlog("currentLevelChanged", { elevId, uuid, user: game.user?.name });
+      CLIENT_STATE.currentLevelByElevatorId[elevId] = uuid;
+      queueRerenderOpenElevatorPanels(elevId);
+    } catch (e) {
+      warn("Socket currentLevelChanged error", e);
     }
   });
 }
@@ -1390,6 +1580,15 @@ function registerSettings() {
     scope: "client",
     type: Boolean,
     default: DEFAULTS.sfxEnabled,
+    config: true
+  });
+
+  game.settings.register(MOD_ID, SETTINGS.Debug, {
+    name: game.i18n.localize(`${MOD_ID}.settings.debug.name`) || "Elevator Debug Logging",
+    hint: game.i18n.localize(`${MOD_ID}.settings.debug.hint`) || "Log extra elevator state to the console.",
+    scope: "client",
+    type: Boolean,
+    default: DEFAULTS.debug,
     config: true
   });
 
