@@ -4,6 +4,21 @@
  */
 
 const MOD_ID = "elevator";
+const SOCKET_CHANNEL = `module.${MOD_ID}`;
+const LEGACY_SOCKET = {
+  setCurrentLevel: `${SOCKET_CHANNEL}.setCurrentLevel`,
+  getCurrentLevel: `${SOCKET_CHANNEL}.getCurrentLevel`,
+  currentLevelChanged: `${SOCKET_CHANNEL}.currentLevelChanged`,
+};
+
+function makeRequestId() {
+  try {
+    const id = foundry?.utils?.randomID?.();
+    return id ? String(id) : String(Date.now());
+  } catch (e) {
+    return String(Date.now());
+  }
+}
 
 const SETTINGS = {
   Theme: "theme",
@@ -15,13 +30,37 @@ const SETTINGS = {
 };
 
 const DEFAULTS = {
-  theme: "light",
+  theme: "default",
   arrivalDelayMs: 2000,
   combatDelayPolicy: "next-round",
   requireGMForAll: false,
   sfxEnabled: true,
   debug: false,
 };
+
+function normalizeThemeValue(theme) {
+  const t = String(theme ?? "").trim().toLowerCase();
+  if (t === "default" || t === "scifi" || t === "horror" || t === "rustic") return t;
+  // Backward compatibility with older versions.
+  if (t === "light" || t === "dark") return "default";
+  if (t === "fantasy") return "rustic";
+  return "default";
+}
+
+function getSceneGridSizePx() {
+  try {
+    const size = Number(canvas?.grid?.size ?? canvas?.scene?.grid?.size ?? 0);
+    return Number.isFinite(size) && size > 0 ? size : 100;
+  } catch (e) {
+    return 100;
+  }
+}
+
+function clampNumber(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.min(max, Math.max(min, x));
+}
 
 // World store for current elevator level per elevatorId
 const WORLD_STATE = {
@@ -60,13 +99,18 @@ function requestSyncCurrentLevel(elevatorId) {
   const elevId = String(elevatorId ?? "").trim();
   if (!elevId) return;
   if (game.user?.isGM) return;
-  game.socket.emit(`module.${MOD_ID}.getCurrentLevel`, { elevatorId: elevId, requester: game.user?.id });
+  const requestId = makeRequestId();
+  game.socket.emit(SOCKET_CHANNEL, { type: "getCurrentLevel", requestId, elevatorId: elevId, requester: game.user?.id });
+  // Backward compatibility for clients still listening on per-event channels.
+  game.socket.emit(LEGACY_SOCKET.getCurrentLevel, { requestId, elevatorId: elevId, requester: game.user?.id });
 }
 
 async function requestSetCurrentLevel(elevatorId, regionUuid) {
   const elevId = String(elevatorId ?? "").trim();
   const uuid = String(regionUuid ?? "").trim();
   if (!elevId || !uuid) return;
+
+  const requestId = makeRequestId();
 
   // Optimistically update local state so UIs can respond immediately.
   CLIENT_STATE.currentLevelByElevatorId[elevId] = uuid;
@@ -79,17 +123,131 @@ async function requestSetCurrentLevel(elevatorId, regionUuid) {
     await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
 
     // Also broadcast for immediate client updates.
-    game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
+    game.socket.emit(SOCKET_CHANNEL, { type: "currentLevelChanged", requestId, elevatorId: elevId, regionUuid: uuid });
+    game.socket.emit(LEGACY_SOCKET.currentLevelChanged, { requestId, elevatorId: elevId, regionUuid: uuid });
     return;
   }
 
   // Players cannot update world settings; request the GM to do it.
-  game.socket.emit(`module.${MOD_ID}.setCurrentLevel`, { elevatorId: elevId, regionUuid: uuid, requester: game.user?.id });
+  game.socket.emit(SOCKET_CHANNEL, { type: "setCurrentLevel", requestId, elevatorId: elevId, regionUuid: uuid, requester: game.user?.id });
+  game.socket.emit(LEGACY_SOCKET.setCurrentLevel, { requestId, elevatorId: elevId, regionUuid: uuid, requester: game.user?.id });
 }
 
 // Simple logger
 function log(...args) { console.log(`[${MOD_ID}]`, ...args); }
 function warn(...args) { console.warn(`[${MOD_ID}]`, ...args); }
+
+async function createGMApprovalChatCard(payload) {
+  try {
+    const gmIds = (game.users || []).filter(u => u?.isGM).map(u => u.id);
+    if (!gmIds.length) return;
+
+    const requesterName = game.users?.get?.(payload?.requester)?.name || "Player";
+    const approveLabel = game.i18n.localize(`${MOD_ID}.gm.approvalTitle`) || "Approve Group Teleport";
+    const prompt = game.i18n.localize(`${MOD_ID}.gm.approvalPrompt`) || "Approve teleporting tokens to the selected destination?";
+    const destLabel = String(payload?.destLabel ?? "").trim();
+    const destHeading = game.i18n.localize(`${MOD_ID}.gm.destinationLabel`) || "Destination";
+    const destLine = destLabel ? `<p><strong>${destHeading}:</strong> ${destLabel}</p>` : "";
+
+    const content = `
+      <div class="elevator-approval-card" data-elevator-approval="1">
+        <p><strong>${approveLabel}</strong></p>
+        ${destLine}
+        <p>${prompt}</p>
+        <p><em>${requesterName}</em></p>
+        <div class="elevator-approval-actions">
+          <button type="button" data-action="elevator-approve">Approve</button>
+          <button type="button" data-action="elevator-deny">Deny</button>
+        </div>
+      </div>
+    `;
+
+    await ChatMessage.create({
+      content,
+      whisper: gmIds,
+      flags: { [MOD_ID]: { teleportRequest: payload } }
+    });
+  } catch (e) {
+    warn("createGMApprovalChatCard error", e);
+  }
+}
+
+async function createApprovalChatCard(payload, { whisperIds, tokenLabel } = {}) {
+  try {
+    const recipients = (Array.isArray(whisperIds) ? whisperIds : []).filter(Boolean);
+    if (!recipients.length) return;
+
+    const requesterName = game.users?.get?.(payload?.requester)?.name || "Player";
+    const approveLabel = game.i18n.localize(`${MOD_ID}.gm.approvalTitle`) || "Approve Group Teleport";
+    const prompt = game.i18n.localize(`${MOD_ID}.gm.approvalPrompt`) || "Approve teleporting tokens to the selected destination?";
+    const tokenLine = tokenLabel ? `<p><strong>${tokenLabel}</strong></p>` : "";
+    const destLabel = String(payload?.destLabel ?? "").trim();
+    const destHeading = game.i18n.localize(`${MOD_ID}.gm.destinationLabel`) || "Destination";
+    const destLine = destLabel ? `<p><strong>${destHeading}:</strong> ${destLabel}</p>` : "";
+
+    const content = `
+      <div class="elevator-approval-card" data-elevator-approval="1">
+        <p><strong>${approveLabel}</strong></p>
+        ${tokenLine}
+        ${destLine}
+        <p>${prompt}</p>
+        <p><em>${requesterName}</em></p>
+        <div class="elevator-approval-actions">
+          <button type="button" data-action="elevator-approve">Approve</button>
+          <button type="button" data-action="elevator-deny">Deny</button>
+        </div>
+      </div>
+    `;
+
+    await ChatMessage.create({
+      content,
+      whisper: recipients,
+      flags: { [MOD_ID]: { teleportRequest: payload } }
+    });
+  } catch (e) {
+    warn("createApprovalChatCard error", e);
+  }
+}
+
+function getActorOwnerUserIds(actorDoc) {
+  try {
+    const actor = actorDoc;
+    if (!actor) return [];
+    const ownership = actor.ownership || {};
+    const OWNER = CONST?.DOCUMENT_OWNERSHIP_LEVELS?.OWNER ?? 3;
+    return (game.users || [])
+      .filter(u => {
+        const lvl = Number(ownership?.[u.id] ?? ownership?.default ?? 0);
+        return Number.isFinite(lvl) && lvl >= OWNER;
+      })
+      .map(u => u.id);
+  } catch (e) {
+    return [];
+  }
+}
+
+function getGMUserIds({ onlineOnly = false } = {}) {
+  return (game.users || [])
+    .filter(u => u?.isGM && (!onlineOnly || u?.active))
+    .map(u => u.id);
+}
+
+function computeApprovalRecipientsForToken(tokenDoc) {
+  const ownerIds = getActorOwnerUserIds(tokenDoc?.actor);
+  const onlineOwnerIds = ownerIds.filter(uid => !!game.users?.get?.(uid)?.active);
+  const onlineNonGmOwners = onlineOwnerIds.filter(uid => !game.users?.get?.(uid)?.isGM);
+
+  // Prefer online non-GM owners.
+  if (onlineNonGmOwners.length) return { recipientIds: onlineNonGmOwners, routedTo: "owner" };
+
+  // Otherwise route to an online GM.
+  const onlineGms = getGMUserIds({ onlineOnly: true });
+  if (onlineGms.length) return { recipientIds: onlineGms, routedTo: "gm" };
+
+  // Fallback to any GM ids.
+  const anyGms = getGMUserIds({ onlineOnly: false });
+  return { recipientIds: anyGms, routedTo: "gm" };
+}
 
 async function playDoorSfxAndWait() {
   try {
@@ -307,13 +465,33 @@ function tokensInsideRegion(region) {
     const pt = tok.center || { x: tok.x + tok.width/2, y: tok.y + tok.height/2 };
     if (isPointInRegion(pt, region)) inside.push(tok.document);
   }
+
+  try {
+    /*
+    dlog("tokensInsideRegion", {
+      regionUuid: region?.document?.uuid,
+      regionName: region?.document?.name,
+      count: inside.length,
+      tokens: inside.map(td => ({
+        uuid: td?.uuid,
+        name: td?.name,
+        actor: td?.actor?.name,
+        hidden: !!td?.hidden,
+        disposition: td?.disposition,
+        isOwner: !!td?.isOwner
+      }))
+    });
+    */
+  } catch (e) { /* ignore */ }
+
   return inside;
 }
 
 // Point-in-region using polygonTree bounds centers (approximate)
 function isPointInRegion(pt, region) {
   try {
-    const tree = region?.document?.polygonTree;
+    const doc = region?.document ?? region;
+    const tree = doc?.polygonTree;
     if (!tree) return false;
     for (const node of tree) {
       const b = node?.bounds;
@@ -328,6 +506,42 @@ function isPointInRegion(pt, region) {
     }
   } catch (e) { /* ignore */ }
   return false;
+}
+
+function getGridSizePxForScene(scene) {
+  try {
+    const size = Number(scene?.grid?.size ?? canvas?.grid?.size ?? 0);
+    return Number.isFinite(size) && size > 0 ? size : 100;
+  } catch (e) {
+    return 100;
+  }
+}
+
+function tokenCenterPointPx(tokenDoc, gridSizePx) {
+  const x = Number(tokenDoc?.x ?? 0);
+  const y = Number(tokenDoc?.y ?? 0);
+  const w = Number(tokenDoc?.width ?? 1);
+  const h = Number(tokenDoc?.height ?? 1);
+  return {
+    x: x + (w * gridSizePx) / 2,
+    y: y + (h * gridSizePx) / 2
+  };
+}
+
+function isTokenOwnedByUser(tokenDoc, userId) {
+  const uid = String(userId ?? "").trim();
+  const user = uid ? game.users?.get?.(uid) : null;
+  if (!user) return false;
+  try {
+    const actor = tokenDoc?.actor;
+    const OWNER = CONST?.DOCUMENT_OWNERSHIP_LEVELS?.OWNER ?? 3;
+    if (actor?.testUserPermission) return !!actor.testUserPermission(user, OWNER);
+    const ownership = actor?.ownership || {};
+    const lvl = Number(ownership?.[uid] ?? ownership?.default ?? 0);
+    return lvl >= OWNER;
+  } catch (e) {
+    return false;
+  }
 }
 
 function getElevatorOverlayRoot() {
@@ -649,6 +863,7 @@ class ElevatorPanel extends Application {
 
   getData(_options = {}) {
     const delayMs = game.settings.get(MOD_ID, SETTINGS.ArrivalDelayMs) || DEFAULTS.arrivalDelayMs;
+    const gridSizePx = getSceneGridSizePx();
 
     const { options: regionUuidOptions, uuidToLabel } = (game.user?.isGM && this._editMode)
       ? buildRegionUuidIndex()
@@ -710,29 +925,56 @@ class ElevatorPanel extends Application {
         })()
       : baseLevels;
 
+    const iconSizePx = Number.isFinite(this.flags.iconSize) ? this.flags.iconSize : gridSizePx;
+    const iconScalePct = clampNumber(Math.round((iconSizePx / gridSizePx) * 100), 20, 200);
+
     const cfg = {
       enabled: !!this.flags.enabled,
       elevatorId: this.flags.elevatorId || "",
       isElevatorHere: !!this.flags.isElevatorHere,
-      theme: this.flags.theme || (game.settings.get(MOD_ID, SETTINGS.Theme) || DEFAULTS.theme),
+      theme: normalizeThemeValue(this.flags.theme || (game.settings.get(MOD_ID, SETTINGS.Theme) || DEFAULTS.theme)),
       iconSrc: this.flags.iconSrc || "modules/elevator/images/interface.webp",
-      iconSize: Number.isFinite(this.flags.iconSize) ? this.flags.iconSize : 48,
+      iconSize: iconSizePx,
+      iconScalePct,
       iconAlwaysOn: !!this.flags.iconAlwaysOn,
       // IMPORTANT: config editor should not include synthesized return entries.
       levels: stopsForEdit
     };
 
+    // Player-flavor themes are only applied to the action button/call layouts.
+    // The window surfaces, settings, and GM edit UI should remain Foundry-default.
+    const flavorTheme = (cfg.theme === "scifi" || cfg.theme === "rustic") ? cfg.theme : "";
+
     return {
       isHere: !!this._elevatorState?.isHere,
       arrivalSeconds: Math.floor(delayMs / 1000),
-      themeClass: game.settings.get(MOD_ID, SETTINGS.Theme) || DEFAULTS.theme,
+      // Keep the overall panel surfaces in Foundry-default styling.
+      themeClass: "default",
+      // Apply optional player-flavor styling only to the action layout.
+      flavorClass: flavorTheme,
       levels,
       isGM: !!game.user?.isGM,
       editMode: !!this._editMode,
       config: cfg,
       regionUuidOptions,
-      configTab: this._configTab
+      configTab: this._configTab,
+      gridSizePx
     };
+  }
+
+  _syncWindowThemeClass(html) {
+    const el = this.element?.[0] ?? html?.[0] ?? null;
+    if (!el?.classList) return;
+
+    const bodyClasses = document.body?.classList;
+    const wantsDark = !!bodyClasses?.contains?.("theme-dark");
+    if (wantsDark) {
+      el.classList.add("theme-dark");
+      el.classList.remove("theme-light");
+    } else {
+      el.classList.add("theme-light");
+      el.classList.remove("theme-dark");
+    }
   }
 
   async _propagateToDestinationRegions({ elevatorId, theme, iconSrc, iconSize, iconAlwaysOn, levels }) {
@@ -773,6 +1015,29 @@ class ElevatorPanel extends Application {
 
   activateListeners(html) {
     super.activateListeners(html);
+
+    try { this._syncWindowThemeClass(html); } catch (e) { /* ignore */ }
+
+    // Sync icon scale percent inputs (number <-> range) and keep hidden px field in sync.
+    try {
+      const form = html.find('form.elevator-config-form');
+      if (form?.length) {
+        const pctNumber = form.find('input[name="iconScalePct"]');
+        const pctRange = form.find('input[name="iconScalePctRange"]');
+        const pxHidden = form.find('input[name="iconSize"]');
+
+        const sync = (value) => {
+          const v = clampNumber(value, 20, 200);
+          pctNumber.val(String(v));
+          pctRange.val(String(v));
+          const px = Math.max(24, Math.round((getSceneGridSizePx() * v) / 100));
+          pxHidden.val(String(px));
+        };
+
+        pctNumber.on('input change', (ev) => sync(ev.currentTarget?.value));
+        pctRange.on('input change', (ev) => sync(ev.currentTarget?.value));
+      }
+    } catch (e) { /* ignore */ }
 
     const activateDragReorder = () => {
       if (!game.user?.isGM || !this._editMode) return;
@@ -1118,10 +1383,14 @@ class ElevatorPanel extends Application {
       const enabled = !!form.find('input[name="enabled"]').prop('checked');
       const elevatorId = String(form.find('input[name="elevatorId"]').val() ?? "").trim();
       const isElevatorHere = !!form.find('input[name="isElevatorHere"]').prop('checked');
-      const theme = String(form.find('select[name="theme"]').val() ?? DEFAULTS.theme);
+      const theme = normalizeThemeValue(String(form.find('select[name="theme"]').val() ?? DEFAULTS.theme));
       const iconSrc = String(form.find('input[name="iconSrc"]').val() ?? "").trim();
-      const iconSizeRaw = Number(form.find('input[name="iconSize"]').val());
-      const iconSize = Number.isFinite(iconSizeRaw) ? Math.max(24, Math.floor(iconSizeRaw)) : 48;
+
+      const pctFromNumber = form.find('input[name="iconScalePct"]').val();
+      const pctFromRange = form.find('input[name="iconScalePctRange"]').val();
+      const iconScalePct = clampNumber(pctFromNumber ?? pctFromRange ?? 100, 20, 200);
+      const iconSize = Math.max(24, Math.round((getSceneGridSizePx() * iconScalePct) / 100));
+
       const iconAlwaysOn = !!form.find('input[name="iconAlwaysOn"]').prop('checked');
 
       const currentUuid = this.region.document.uuid;
@@ -1219,6 +1488,8 @@ class ElevatorPanel extends Application {
     const dest = await fromUuid(destUUID);
     if (!(dest instanceof RegionDocument)) return ui.notifications.error(game.i18n.localize(`${MOD_ID}.error.invalidDestination`));
 
+    const destLabel = `${dest.parent?.name || ""}${REGION_LABEL_SPACING}${dest.name || ""}`.trim();
+
     // If selecting the current stop, do nothing.
     if (destUUID === this.region.document.uuid) {
       this._elevatorState = this._deriveState();
@@ -1228,6 +1499,23 @@ class ElevatorPanel extends Application {
     const tokens = tokensInsideRegion(this.region);
     if (!tokens.length) return ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.noTokensInRegion`));
 
+    try {
+      dlog("Panel select: tokens inside region", {
+        user: game.user?.name,
+        userId: game.user?.id,
+        regionUuid: this.region?.document?.uuid,
+        regionName: this.region?.document?.name,
+        tokenCount: tokens.length,
+        tokens: tokens.map(td => ({
+          uuid: td?.uuid,
+          name: td?.name,
+          actor: td?.actor?.name,
+          hidden: !!td?.hidden,
+          isOwner: !!td?.isOwner
+        }))
+      });
+    } catch (e) { /* ignore */ }
+
     // Play SFX first, then teleport after it finishes.
     await playDoorSfxAndWait();
 
@@ -1236,6 +1524,15 @@ class ElevatorPanel extends Application {
     for (const t of tokens) {
       (t.isOwner ? owned : notOwned).push(t);
     }
+
+    try {
+      dlog("Panel select: ownership split", {
+        user: game.user?.name,
+        owned: owned.map(t => ({ uuid: t?.uuid, name: t?.name, actor: t?.actor?.name })),
+        notOwned: notOwned.map(t => ({ uuid: t?.uuid, name: t?.name, actor: t?.actor?.name })),
+        requireAllGM
+      });
+    } catch (e) { /* ignore */ }
 
     // Owned tokens: teleport locally
     for (const t of owned) {
@@ -1249,19 +1546,49 @@ class ElevatorPanel extends Application {
     }
 
     // Non-owned tokens: request GM/owner approval
-    if (notOwned.length) {
-      const payload = {
-        requester: game.user.id,
-        destUUID,
-        tokenUUIDs: notOwned.map(t => t.uuid),
-        sceneFromId: this.region.document.parent?.id,
-      };
-      if (requireAllGM) {
-        game.socket.emit(`module.${MOD_ID}.teleportRequest`, payload);
-        ui.notifications.info(game.i18n.localize(`${MOD_ID}.info.sentGMRequest`));
-      } else {
-        game.socket.emit(`module.${MOD_ID}.teleportRequest`, payload);
-        ui.notifications.info(game.i18n.localize(`${MOD_ID}.info.sentOwnerRequest`));
+    // IMPORTANT: A player may not be able to see hidden/unowned tokens (so we can't enumerate them).
+    // Always send a request with source region/scene info; GM will compute which tokens need approval.
+    const payload = {
+      requestId: makeRequestId(),
+      requester: game.user.id,
+      elevatorId: this.flags.elevatorId,
+      destUUID,
+      destLabel,
+      tokenUUIDs: notOwned.map(t => t.uuid),
+      sceneFromId: this.region.document.parent?.id,
+      sourceRegionUuid: this.region.document.uuid
+    };
+
+    try { dlog("Teleport request payload", payload); } catch (e) { /* ignore */ }
+
+    if (!game.user?.isGM) {
+      // Approval routing via chat cards (server-mediated, reliable across multi-machine setups):
+      // - Prefer online non-GM token owners
+      // - Otherwise route to GM (GM-only owner, or owners offline)
+      if (notOwned.length) {
+        let sentToOwner = 0;
+        let sentToGM = 0;
+
+        for (const t of notOwned) {
+          const { recipientIds, routedTo } = computeApprovalRecipientsForToken(t);
+          if (!recipientIds?.length) continue;
+
+          const oneTokenPayload = {
+            ...payload,
+            requestId: makeRequestId(),
+            tokenUUIDs: [t.uuid]
+          };
+          const tokenLabel = t?.name || t?.actor?.name || "Token";
+          try {
+            await createApprovalChatCard(oneTokenPayload, { whisperIds: recipientIds, tokenLabel });
+            if (routedTo === "owner") sentToOwner += 1;
+            else sentToGM += 1;
+          } catch (e) { /* ignore */ }
+        }
+
+        if (sentToOwner) ui.notifications.info(game.i18n.localize(`${MOD_ID}.info.sentOwnerRequest`));
+        if (sentToGM) ui.notifications.info(game.i18n.localize(`${MOD_ID}.info.sentGMRequest`));
+        if (requireAllGM && !sentToGM) ui.notifications.info(game.i18n.localize(`${MOD_ID}.info.sentGMRequest`));
       }
     }
 
@@ -1322,73 +1649,257 @@ function queueRerenderOpenElevatorPanels(elevatorId) {
 }
 
 // Socket handling (GM-side)
+let SOCKET_REGISTERED = false;
+const _SEEN_SOCKET_IDS = new Map();
+
+function wasSocketRequestSeen(requestId, windowMs = 8000) {
+  const id = String(requestId ?? "").trim();
+  if (!id) return false;
+  const now = Date.now();
+  // Cleanup opportunistically
+  for (const [k, ts] of _SEEN_SOCKET_IDS) {
+    if (now - ts > windowMs) _SEEN_SOCKET_IDS.delete(k);
+  }
+  if (_SEEN_SOCKET_IDS.has(id)) return true;
+  _SEEN_SOCKET_IDS.set(id, now);
+  return false;
+}
+async function gmTeleportTokenToRegion(destRegionDoc, tokenUuid) {
+  const tokenEntity = await fromUuid(tokenUuid);
+  if (!tokenEntity) return;
+  // fromUuid for a Token returns a TokenDocument; for safety accept either.
+  const tokenDoc = tokenEntity?.document ?? tokenEntity;
+  const tokenObj = tokenDoc?.object ?? tokenEntity?.object ?? null;
+  if (typeof destRegionDoc?.teleportToken !== "function") throw new Error("Destination region has no teleportToken method");
+
+  try {
+    // Prefer TokenDocument (works cross-scene); fall back to Token object if needed.
+    await destRegionDoc.teleportToken(tokenDoc);
+  } catch (e) {
+    if (tokenObj) await destRegionDoc.teleportToken(tokenObj);
+    else throw e;
+  }
+}
+
 function registerSocket() {
-  game.socket.on(`module.${MOD_ID}.teleportRequest`, async payload => {
-    if (!game.user.isGM) return;
+  if (SOCKET_REGISTERED) return;
+  SOCKET_REGISTERED = true;
+
+  const handleSocketMessage = async (data) => {
+    const type = String(data?.type ?? "").trim();
+    if (!type) return;
+
+    // De-dupe for mixed clients (we may receive the same request on both unified + legacy channels).
+    if (wasSocketRequestSeen(data?.requestId)) return;
+
+    // Debug connectivity test
+    if (type === "socketPing") {
+      try {
+        dlog("socketPing received", {
+          requestId: data?.requestId,
+          fromUserId: data?.fromUserId,
+          fromUserName: game.users?.get?.(data?.fromUserId)?.name,
+          user: game.user?.name,
+          isGM: !!game.user?.isGM
+        });
+      } catch (e) { /* ignore */ }
+
+      // Only a GM responds.
+      if (!game.user?.isGM) return;
+      try {
+        game.socket.emit(SOCKET_CHANNEL, {
+          type: "socketPong",
+          requestId: data?.requestId,
+          toUserId: data?.fromUserId,
+          fromUserId: game.user?.id
+        });
+      } catch (e) { /* ignore */ }
+      return;
+    }
+
+    if (type === "socketPong") {
+      if (String(data?.toUserId ?? "") !== String(game.user?.id ?? "")) return;
+      try {
+        dlog("socketPong received", {
+          requestId: data?.requestId,
+          fromUserId: data?.fromUserId,
+          fromUserName: game.users?.get?.(data?.fromUserId)?.name
+        });
+      } catch (e) { /* ignore */ }
+      try { ui.notifications?.info?.("Elevator: GM socket response received (debug)"); } catch (e) { /* ignore */ }
+      return;
+    }
+
+    // Player -> GM: update world state
+    if (type === "setCurrentLevel") {
+      if (!game.user?.isGM) return;
+      try {
+        const elevId = String(data?.elevatorId ?? "").trim();
+        const uuid = String(data?.regionUuid ?? "").trim();
+        if (!elevId || !uuid) return;
+
+        dlog("GM setCurrentLevel", { elevId, uuid, requester: data?.requester });
+
+        const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
+        currentById[elevId] = uuid;
+        await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
+
+        // Broadcast so all clients update immediately.
+        const requestId = String(data?.requestId ?? "").trim() || makeRequestId();
+        game.socket.emit(SOCKET_CHANNEL, { type: "currentLevelChanged", requestId, elevatorId: elevId, regionUuid: uuid });
+        game.socket.emit(LEGACY_SOCKET.currentLevelChanged, { requestId, elevatorId: elevId, regionUuid: uuid });
+      } catch (e) {
+        warn("Socket setCurrentLevel error", e);
+      }
+      return;
+    }
+
+    // Player -> GM: request current state
+    if (type === "getCurrentLevel") {
+      if (!game.user?.isGM) return;
+      try {
+        const elevId = String(data?.elevatorId ?? "").trim();
+        if (!elevId) return;
+        const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
+        const uuid = String(currentById?.[elevId] || "").trim();
+        dlog("GM getCurrentLevel", { elevId, uuid, requester: data?.requester });
+        if (!uuid) return;
+        const requestId = String(data?.requestId ?? "").trim() || makeRequestId();
+        game.socket.emit(SOCKET_CHANNEL, { type: "currentLevelChanged", requestId, elevatorId: elevId, regionUuid: uuid });
+        game.socket.emit(LEGACY_SOCKET.currentLevelChanged, { requestId, elevatorId: elevId, regionUuid: uuid });
+      } catch (e) {
+        warn("Socket getCurrentLevel error", e);
+      }
+      return;
+    }
+
+    // GM -> everyone: state broadcast
+    if (type === "currentLevelChanged") {
+      try {
+        const elevId = String(data?.elevatorId ?? "").trim();
+        const uuid = String(data?.regionUuid ?? "").trim();
+        if (!elevId || !uuid) return;
+        dlog("currentLevelChanged", { elevId, uuid, user: game.user?.name });
+        CLIENT_STATE.currentLevelByElevatorId[elevId] = uuid;
+        queueRerenderOpenElevatorPanels(elevId);
+      } catch (e) {
+        warn("Socket currentLevelChanged error", e);
+      }
+    }
+
+  };
+
+  // Unified channel (correct for Foundry)
+  game.socket.on(SOCKET_CHANNEL, handleSocketMessage);
+
+  // Legacy per-event channels (backward compatibility)
+  game.socket.on(LEGACY_SOCKET.setCurrentLevel, (payload) => handleSocketMessage({ ...(payload || {}), type: "setCurrentLevel" }));
+  game.socket.on(LEGACY_SOCKET.getCurrentLevel, (payload) => handleSocketMessage({ ...(payload || {}), type: "getCurrentLevel" }));
+  game.socket.on(LEGACY_SOCKET.currentLevelChanged, (payload) => handleSocketMessage({ ...(payload || {}), type: "currentLevelChanged" }));
+
+  try {
+    dlog("Sockets registered", {
+      channel: SOCKET_CHANNEL,
+      legacy: LEGACY_SOCKET,
+      user: game.user?.name,
+      userId: game.user?.id,
+      isGM: !!game.user?.isGM
+    });
+  } catch (e) { /* ignore */ }
+
+  try {
+    if (isDebugEnabled()) ui.notifications?.info?.("Elevator: sockets registered (debug)");
+  } catch (e) { /* ignore */ }
+}
+
+function registerChatApprovals() {
+  Hooks.on("renderChatMessage", (message, html) => {
     try {
-      const dest = await fromUuid(payload.destUUID);
-      if (!(dest instanceof RegionDocument)) return;
+      const payload = message?.flags?.[MOD_ID]?.teleportRequest;
+      if (!payload) return;
+      const root = html?.[0] ?? html;
+      if (!root?.querySelector) return;
+      const card = root.querySelector('[data-elevator-approval="1"]');
+      if (!card) return;
 
-      const confirm = await foundry.applications.api.DialogV2.confirm({
-        window: { title: game.i18n.localize(`${MOD_ID}.gm.approvalTitle`) },
-        content: `<p>${game.i18n.localize(`${MOD_ID}.gm.approvalPrompt`)}</p>`
-      });
-      if (!confirm) return;
+      const approveBtn = card.querySelector('button[data-action="elevator-approve"]');
+      const denyBtn = card.querySelector('button[data-action="elevator-deny"]');
+      if (approveBtn) {
+        approveBtn.addEventListener("click", async () => {
+          try {
+            const dest = await fromUuid(payload.destUUID);
+            if (!(dest instanceof RegionDocument)) return;
 
-      for (const tUUID of payload.tokenUUIDs || []) {
-        const t = await fromUuid(tUUID);
-        if (t) { try { await dest.teleportToken(t); } catch (e) { warn("GM teleport failed", t, e); } }
+            // Prefer explicit token list; otherwise compute from source region/scene.
+            let tokenUUIDs = Array.isArray(payload.tokenUUIDs) ? payload.tokenUUIDs.filter(Boolean) : [];
+            if (!tokenUUIDs.length && payload.sourceRegionUuid && payload.sceneFromId) {
+              const scene = game.scenes?.get?.(payload.sceneFromId);
+              const srcRegion = await fromUuid(payload.sourceRegionUuid).catch(() => null);
+              if (scene && srcRegion) {
+                const gridSizePx = getGridSizePxForScene(scene);
+                const inside = [];
+                for (const td of scene.tokens || []) {
+                  const pt = tokenCenterPointPx(td, gridSizePx);
+                  if (isPointInRegion(pt, srcRegion)) inside.push(td);
+                }
+                tokenUUIDs = inside
+                  .filter(td => !isTokenOwnedByUser(td, payload.requester))
+                  .map(td => td.uuid);
+              }
+            }
+
+            const approverId = game.user?.id;
+            const isGM = !!game.user?.isGM;
+            const approvedTokenUUIDs = [];
+            for (const tUUID of tokenUUIDs) {
+              try {
+                const tokenEntity = await fromUuid(tUUID);
+                const tokenDoc = tokenEntity?.document ?? tokenEntity;
+                if (!tokenDoc) continue;
+                if (!isGM && !isTokenOwnedByUser(tokenDoc, approverId)) continue;
+                await gmTeleportTokenToRegion(dest, tUUID);
+                approvedTokenUUIDs.push(tUUID);
+              } catch (e) {
+                warn("Approval teleport failed", tUUID, e);
+              }
+            }
+
+            if (!approvedTokenUUIDs.length) {
+              try { ui.notifications?.warn?.(game.i18n.localize(`${MOD_ID}.warn.noTokensApprovable`)); } catch (e) { /* ignore */ }
+              return;
+            }
+
+            // Also persist elevator location if we know the elevator id.
+            try {
+              const elevId = String(payload.elevatorId ?? "").trim();
+              if (elevId) await requestSetCurrentLevel(elevId, payload.destUUID);
+            } catch (e) { /* ignore */ }
+
+            // Notify requester (best-effort).
+            try {
+              const requesterId = String(payload.requester ?? "").trim();
+              if (requesterId) {
+                await ChatMessage.create({
+                  content: game.i18n.format(`${MOD_ID}.info.approvalGranted`, { name: game.user?.name || "GM" }),
+                  whisper: [requesterId]
+                });
+              }
+            } catch (e) { /* ignore */ }
+
+            try { await message.delete(); } catch (e) { /* ignore */ }
+          } catch (e) {
+            warn("Approval chat approve error", e);
+          }
+        });
+      }
+
+      if (denyBtn) {
+        denyBtn.addEventListener("click", async () => {
+          try { await message.delete(); } catch (e) { /* ignore */ }
+        });
       }
     } catch (e) {
-      warn("Socket teleportRequest error", e);
-    }
-  });
-
-  game.socket.on(`module.${MOD_ID}.setCurrentLevel`, async payload => {
-    if (!game.user?.isGM) return;
-    try {
-      const elevId = String(payload?.elevatorId ?? "").trim();
-      const uuid = String(payload?.regionUuid ?? "").trim();
-      if (!elevId || !uuid) return;
-
-      dlog("GM setCurrentLevel", { elevId, uuid, requester: payload?.requester });
-
-      const currentById = foundry.utils.duplicate(game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {});
-      currentById[elevId] = uuid;
-      await game.settings.set(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId, currentById);
-
-      // Broadcast so all clients update immediately (players can't read/write world settings synchronously).
-      game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
-    } catch (e) {
-      warn("Socket setCurrentLevel error", e);
-    }
-  });
-
-  game.socket.on(`module.${MOD_ID}.getCurrentLevel`, async payload => {
-    if (!game.user?.isGM) return;
-    try {
-      const elevId = String(payload?.elevatorId ?? "").trim();
-      if (!elevId) return;
-      const currentById = game.settings.get(MOD_ID, WORLD_STATE.CurrentLevelByElevatorId) || {};
-      const uuid = String(currentById?.[elevId] || "").trim();
-      dlog("GM getCurrentLevel", { elevId, uuid, requester: payload?.requester });
-      if (!uuid) return;
-      game.socket.emit(`module.${MOD_ID}.currentLevelChanged`, { elevatorId: elevId, regionUuid: uuid });
-    } catch (e) {
-      warn("Socket getCurrentLevel error", e);
-    }
-  });
-
-  game.socket.on(`module.${MOD_ID}.currentLevelChanged`, async payload => {
-    try {
-      const elevId = String(payload?.elevatorId ?? "").trim();
-      const uuid = String(payload?.regionUuid ?? "").trim();
-      if (!elevId || !uuid) return;
-      dlog("currentLevelChanged", { elevId, uuid, user: game.user?.name });
-      CLIENT_STATE.currentLevelByElevatorId[elevId] = uuid;
-      queueRerenderOpenElevatorPanels(elevId);
-    } catch (e) {
-      warn("Socket currentLevelChanged error", e);
+      warn("renderChatMessage elevator approval error", e);
     }
   });
 }
@@ -1431,7 +1942,7 @@ function renderRegionConfig(doc, html) {
       isElevatorHere: new fields.BooleanField({ initial: false, label: `${PREFIX}.isHere.label`, hint: `${PREFIX}.isHere.hint` }),
       iconSrc: new fields.FilePathField({ categories: ["IMAGE"], label: `${PREFIX}.icon.label`, hint: `${PREFIX}.icon.hint` }),
       iconSize: new fields.NumberField({ integer: true, min: 24, initial: 48, label: `${PREFIX}.iconSize.label`, hint: `${PREFIX}.iconSize.hint` }),
-      theme: new fields.StringField({ initial: DEFAULTS.theme, label: `${PREFIX}.theme.label`, hint: `${PREFIX}.theme.hint`, choices: { light: "Light", dark: "Dark", scifi: "Sci-Fi", fantasy: "Fantasy" } }),
+      theme: new fields.StringField({ initial: DEFAULTS.theme, label: `${PREFIX}.theme.label`, hint: `${PREFIX}.theme.hint`, choices: { default: "Default", scifi: "Sci-Fi", horror: "Horror", rustic: "Rustic" } }),
       returnTo: new fields.SchemaField({
         uuid: new fields.DocumentUUIDField({ type: "Region" }),
         label: new fields.StringField({ initial: "" })
@@ -1453,7 +1964,7 @@ function renderRegionConfig(doc, html) {
     group.append(schema.fields.isElevatorHere.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.isElevatorHere }));
     group.append(schema.fields.iconSrc.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.iconSrc }));
     group.append(schema.fields.iconSize.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.iconSize }));
-    group.append(schema.fields.theme.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.theme || DEFAULTS.theme }));
+    group.append(schema.fields.theme.toFormGroup({ localize: true }, { value: normalizeThemeValue(doc.document.flags?.[MOD_ID]?.theme || DEFAULTS.theme) }));
 
     // Return destination (optional)
     const returnTo = doc.document.flags?.[MOD_ID]?.returnTo || {};
@@ -1541,7 +2052,7 @@ function registerSettings() {
     hint: game.i18n.localize(`${MOD_ID}.settings.theme.hint`),
     scope: "client",
     type: String,
-    choices: { light: "Light", dark: "Dark", scifi: "Sci-Fi", fantasy: "Fantasy" },
+    choices: { default: "Default", scifi: "Sci-Fi", horror: "Horror", rustic: "Rustic" },
     default: DEFAULTS.theme,
     config: true
   });
@@ -1612,10 +2123,15 @@ function registerSettings() {
 Hooks.on("init", () => {
   registerSettings();
   Hooks.on("renderRegionConfig", renderRegionConfig);
+  registerChatApprovals();
   log("Initialized");
 });
 
 Hooks.once("ready", () => {
+  // Socket listeners must be registered regardless of canvas lifecycle.
+  // Otherwise, GMs may miss player requests if hooks fire out of order.
+  registerSocket();
+
   // GM-only best-effort repair: re-sync known elevator networks from the master links.
   // This helps recover from users deleting flags/behaviors on Regions.
   if (!game.user?.isGM) return;
@@ -1640,6 +2156,5 @@ Hooks.once('canvasInit', () => {
   Hooks.on("canvasReady", refreshAllElevatorOverlays);
   Hooks.on("activateCanvasLayer", refreshAllElevatorOverlays);
   Hooks.on("sightRefresh", queueOverlayRefresh);
-  registerSocket();
   log("Canvas init, hooks registered");
 });

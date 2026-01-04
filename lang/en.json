@@ -5,6 +5,7 @@
 			"callTitle": "Call Elevator",
 			"callButton": "Call",
 			"callHint": "Elevator will arrive in {seconds} seconds",
+			"apology": "We apologise for the delay",
 			"selectTitle": "Select Level",
 			"noLevels": "No levels configured",
 			"edit": "Edit",
@@ -29,19 +30,22 @@
 			"noElevatorId": "Elevator ID not set on this Region.",
 			"noDestination": "No destination selected.",
 			"noTokensInRegion": "No tokens in the elevator Region.",
+			"noTokensApprovable": "No tokens you can approve.",
 			"teleportUnavailable": "Teleport unavailable for this destination."
 		},
 		"info": {
 			"waitNextRound": "Waiting until next round to enable elevator...",
-			"sentGMRequest": "Request sent to GM for non-owned tokens.",
-			"sentOwnerRequest": "Request sent for owner approval of non-owned tokens."
+			"sentGMRequest": "Approval request sent to the GM.",
+			"sentOwnerRequest": "Approval request sent to token owner(s).",
+			"approvalGranted": "Teleport approved by {name}."
 		},
 		"error": {
 			"invalidDestination": "Invalid destination Region UUID."
 		},
 		"gm": {
 			"approvalTitle": "Approve Group Teleport",
-			"approvalPrompt": "Approve teleporting tokens to the selected destination?"
+			"approvalPrompt": "Approve teleporting tokens to the selected destination?",
+			"destinationLabel": "Destination"
 		},
 		"settings": {
 			"theme": {

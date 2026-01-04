@@ -1,6 +1,10 @@
 /* Elevator Panel base styles and themes */
 .elevator-panel {
-	padding: 8px 10px;
+	/* In Foundry v13+, the Application .window-content already provides the
+	   canonical padding (typically 1rem) and the Application provides the
+	   background/border/radius. Keep Default theme visually identical by
+	   not re-styling those surfaces here. */
+	padding: 0;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -11,17 +15,43 @@
 	margin-bottom: 8px;
 }
 .elevator-panel .panel-topbar .panel-edit {
-	padding: 4px 8px;
+	padding: 0.25rem 0.5rem;
+	width: auto;
+	min-width: unset;
 }
 .elevator-panel .panel-section { margin-bottom: 12px; }
 .elevator-panel .panel-title { font-weight: 600; margin-bottom: 6px; }
+.elevator-panel .panel-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+.elevator-panel .panel-header .panel-title {
+	flex: 1;
+	margin-bottom: 0;
+	text-align: center;
+}
 .elevator-panel .level-list { list-style: none; padding: 0; margin: 8px 0; }
-.elevator-panel .level-list li { margin: 4px 0; }
-.elevator-panel button { padding: 6px 10px; }
+.elevator-panel .level-list {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+.elevator-panel .level-list li {
+	margin: 4px 0;
+	display: flex;
+	justify-content: center;
+	width: 100%;
+}
+.elevator-panel .level-btn {
+	text-align: center;
+}
+.elevator-panel:not(.default) button { padding: 6px 10px; }
 
 .elevator-panel .level-btn.is-current {
-	border: 2px solid var(--color-border-positive, #2e8b57);
-	color: var(--color-text-positive, #2e8b57);
+	border: 2px solid var(--color-level-success-border, var(--color-border-positive, #2e8b57));
+	color: var(--color-level-success, var(--color-text-positive, #2e8b57));
 }
 
 .elevator-panel .hidden { display: none; }
@@ -44,22 +74,41 @@
 
 .elevator-panel .elevator-config-form .form-group {
 	display: grid;
-	grid-template-columns: 1fr;
+	grid-template-columns: minmax(140px, 1fr) 2fr;
 	gap: 4px;
 	margin: 6px 0;
+	align-items: center;
 }
 .elevator-panel .elevator-config-form .form-group label { font-size: 12px; opacity: 0.9; }
+.elevator-panel .elevator-config-form .form-group .form-fields {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
 .elevator-panel .elevator-config-form .form-fields input,
 .elevator-panel .elevator-config-form .form-fields select {
 	width: 100%;
+}
+.elevator-panel .elevator-config-form .form-fields input[type="checkbox"] {
+	width: auto;
+}
+.elevator-panel .elevator-config-form .form-fields input[type="range"] {
+	width: 100%;
+}
+
+.elevator-panel .elevator-config-form .form-fields.icon-size-fields input[type="number"] {
+	width: 5.5em;
+}
+.elevator-panel .elevator-config-form .form-fields.icon-size-fields input[type="range"] {
+	flex: 1;
 }
 
 .elevator-panel .icon-picker {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 48px;
-	height: 48px;
+	width: 100px;
+	height: 100px;
 	border: 1px solid var(--color-border-light-2, #bbb);
 	border-radius: 8px;
 	overflow: hidden;
@@ -69,7 +118,7 @@
 .elevator-panel .icon-picker .icon-preview {
 	width: 100%;
 	height: 100%;
-	object-fit: cover;
+	object-fit: contain;
 }
 .elevator-panel .levels-editor { margin-top: 10px; }
 .elevator-panel .levels-rows { display: flex; flex-direction: column; gap: 6px; }
@@ -120,11 +169,256 @@
 	margin-top: 10px;
 }
 
-.elevator-panel.light { --fg: #222; --bg: #fff; }
-.elevator-panel.dark { --fg: #eee; --bg: #1f2330; }
-.elevator-panel.scifi { --fg: #d6f3ff; --bg: #0b1a24; }
-.elevator-panel.fantasy { --fg: #2b1a10; --bg: #f2ead6; }
+/*
+	Foundry V13+ includes a V1 compatibility layer that applies a parchment/denim look to
+	legacy `.app.window-app` windows (via `body.game .app.window-app .window-content`).
+	Our ElevatorPanel currently renders as a legacy window, so we override those legacy
+	rules for this specific app id to match the modern `.application` look and inherit
+	Foundry's active light/dark theme.
+*/
+#elevator-panel.app.window-app {
+	background: var(--background);
+	border: 1px solid var(--color-border);
+	border-radius: 6px;
+	box-shadow: 0 0 10px #000;
+	color: var(--color-text-primary);
+	overflow: hidden;
+	/* Let the window size to its contents rather than a fixed width. */
+	width: fit-content !important;
+	min-width: 280px;
+	max-width: 90vw;
+}
 
-.elevator-panel { color: var(--fg); background: var(--bg); border-radius: 6px; }
+/* In V13 the legacy `.window-app` base variables skew dark; match Foundry light theme variables here. */
+#elevator-panel.app.window-app.theme-light {
+	/* Module CSS URLs resolve relative to the module file path, so use an absolute core URL. */
+	--background: url("/ui/parchment.jpg") repeat;
+	--color-header-background: var(--color-dark-3);
+	--color-border: var(--color-cool-4);
+	--color-select-option-bg: var(--color-light-1);
+	background: url("/ui/parchment.jpg") repeat;
+}
+
+#elevator-panel.app.window-app .window-header {
+	background: var(--color-header-background);
+	border-bottom: 1px solid var(--color-border);
+	padding: 0 0.5rem;
+	gap: 0.25rem;
+	font-size: var(--font-size-13);
+	color: var(--color-light-1);
+}
+
+#elevator-panel.app.window-app .window-header .window-title {
+	color: var(--color-light-1);
+}
+
+#elevator-panel.app.window-app .window-content {
+	padding: 1rem;
+	background: transparent;
+	color: inherit;
+}
+
+/* Override Foundry V1-compat button styling (cream background) for this app. */
+#elevator-panel.app.window-app button {
+	width: auto;
+	min-width: unset;
+	line-height: normal;
+	background: var(--button-background-color);
+	border: 1px solid var(--button-border-color);
+	border-radius: 6px;
+	color: var(--button-text-color);
+	padding: 0.25rem 0.5rem;
+}
+
+#elevator-panel.app.window-app button:hover,
+#elevator-panel.app.window-app button:focus {
+	background: var(--button-hover-background-color);
+	border-color: var(--button-hover-border-color);
+	color: var(--button-hover-text-color);
+	box-shadow: none;
+}
+
+/* Override Foundry V1-compat inputs which can force dark text on dark backgrounds. */
+#elevator-panel.app.window-app input,
+#elevator-panel.app.window-app select,
+#elevator-panel.app.window-app textarea {
+	color: var(--input-text-color, var(--color-text-primary));
+	background: var(--input-background-color, rgba(0, 0, 0, 0.05));
+	border: 1px solid var(--input-border-color, var(--color-border));
+}
+
+/* Ensure <select> dropdown options are also themed (browser defaults are often light). */
+#elevator-panel.app.window-app select option,
+#elevator-panel.app.window-app select optgroup {
+	background: var(--color-select-option-bg, var(--background));
+	color: var(--color-text-primary);
+}
+
+#elevator-panel.app.window-app input::placeholder,
+#elevator-panel.app.window-app textarea::placeholder {
+	color: var(--input-placeholder-color, var(--color-text-subtle, var(--color-text-secondary)));
+}
+
+/* Ensure current-level highlight wins over the app-wide button reset. */
+#elevator-panel.app.window-app .elevator-panel .level-btn.is-current {
+	border: 2px solid var(--color-level-success-border, var(--color-border-positive, #2e8b57));
+	color: var(--color-level-success, var(--color-text-positive, #2e8b57));
+}
+
+.elevator-panel.default {
+	color: inherit;
+	background: transparent;
+	border-radius: 0;
+}
+
+/*
+	Player-flavor themes
+	Only applied to the action layout (call button + level buttons).
+	Window surfaces + settings/edit UI remain Foundry-default.
+*/
+.elevator-flavor { display: contents; }
+
+.elevator-flavor.scifi,
+.elevator-flavor.rustic {
+	display: grid;
+	justify-items: center;
+	gap: 8px;
+	padding: 10px;
+	border-radius: 6px;
+	border: 1px solid var(--color-border);
+}
+
+/* Optional background images: set these vars to `url("...")` if you add textures later. */
+.elevator-flavor.scifi { --elevator-flavor-bg-image: none; }
+.elevator-flavor.rustic { --elevator-flavor-bg-image: url("/modules/elevator/images/panels/rustic_01.webp"); }
+
+.elevator-flavor.scifi {
+	border-color: var(--color-cool-4, var(--color-border));
+	background:
+		var(--elevator-flavor-bg-image),
+		linear-gradient(180deg, var(--color-dark-1, #111), var(--color-dark-3, #000));
+	background-size: cover;
+	background-position: center;
+	/* Default SciFi text: light grey */
+	color: var(--color-light-2, #cfcfcf);
+	/* Teal accent derived from Foundry tokens (avoids hardcoding a new color). */
+	--elevator-scifi-accent: var(
+		--color-level-info,
+		#59a1f6
+	);
+	--elevator-scifi-accent: color-mix(
+		in srgb,
+		var(--color-level-info, #59a1f6) 70%,
+		var(--color-level-success, #26b231) 30%
+	);
+	/* Touchscreen panel feel */
+	box-shadow:
+		0 0 0 1px var(--color-cool-5, var(--color-border)) inset,
+		0 0 12px rgba(0, 0, 0, 0.6);
+}
+
+.elevator-flavor.rustic {
+	border-color: var(--color-warm-3, var(--color-border));
+	background:
+		var(--elevator-flavor-bg-image),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(0, 0, 0, 0.08));
+	background-size: cover;
+	background-position: center;
+}
+
+.elevator-flavor.scifi .level-btn,
+.elevator-flavor.scifi .call-btn {
+	border-color: var(--color-cool-4, var(--button-border-color));
+	border-radius: 4px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-weight: 600;
+	text-shadow: 0 0 6px rgba(0, 0, 0, 0.65);
+}
+
+/* SciFi current level: bright teal outline + text */
+#elevator-panel.app.window-app .elevator-flavor.scifi .level-btn.is-current {
+	border: 2px solid var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+	color: var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+	box-shadow:
+		0 0 0 1px rgba(0, 0, 0, 0.25) inset,
+		0 0 14px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 55%, transparent),
+		0 0 26px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 30%, transparent);
+	text-shadow:
+		0 0 10px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 70%, transparent),
+		0 0 18px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 35%, transparent);
+}
+
+/* SciFi button surfaces: dark "glass" with a cool border. */
+#elevator-panel.app.window-app .elevator-flavor.scifi .level-btn,
+#elevator-panel.app.window-app .elevator-flavor.scifi .call-btn {
+	background: linear-gradient(180deg, var(--color-dark-2, #111), var(--color-dark-4, #000));
+	border-color: var(--color-cool-4, var(--button-border-color));
+	/* Ensure these win over the app-wide button rule. */
+	color: var(--color-light-2, #cfcfcf);
+	font-family: var(--font-monospace, var(--font-primary));
+}
+
+#elevator-panel.app.window-app .elevator-flavor.scifi .level-btn:hover,
+#elevator-panel.app.window-app .elevator-flavor.scifi .level-btn:focus,
+#elevator-panel.app.window-app .elevator-flavor.scifi .call-btn:hover,
+#elevator-panel.app.window-app .elevator-flavor.scifi .call-btn:focus {
+	background: linear-gradient(180deg, var(--color-dark-1, #141414), var(--color-dark-3, #000));
+	border-color: var(--color-cool-3, var(--button-hover-border-color));
+	color: var(--color-light-2, #cfcfcf);
+}
+
+/* SciFi call button: teal outline + text (touchscreen "action" affordance). */
+#elevator-panel.app.window-app .elevator-flavor.scifi button.call-btn {
+	border: 2px solid var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+	color: var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+	box-shadow:
+		0 0 0 1px rgba(0, 0, 0, 0.25) inset,
+		0 0 14px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 45%, transparent),
+		0 0 26px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 25%, transparent);
+	text-shadow:
+		0 0 10px color-mix(in srgb, var(--elevator-scifi-accent, #59a1f6) 65%, transparent);
+}
+
+#elevator-panel.app.window-app .elevator-flavor.scifi button.call-btn:hover,
+#elevator-panel.app.window-app .elevator-flavor.scifi button.call-btn:focus {
+	border-color: var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+	color: var(--elevator-scifi-accent, var(--color-level-info, #59a1f6));
+}
+
+.elevator-flavor.rustic .level-btn,
+.elevator-flavor.rustic .call-btn {
+	border-color: var(--color-warm-3, var(--button-border-color));
+	border-radius: 10px;
+	/* Improve readability over the woodgrain texture. */
+	font-weight: 700;
+	font-size: 1.05em;
+	color: var(--color-text-dark-primary, #1b1b1b);
+	text-shadow:
+		0 1px 0 rgba(255, 255, 255, 0.35),
+		0 0 2px rgba(0, 0, 0, 0.7);
+}
+
+/* Rustic button texture (ensure it survives Foundry's legacy button background shorthands). */
+#elevator-panel.app.window-app .elevator-flavor.rustic .level-btn,
+#elevator-panel.app.window-app .elevator-flavor.rustic .call-btn {
+	background: url("/modules/elevator/images/panels/rustic_02.webp") center / cover no-repeat, var(--button-background-color);
+}
+
+#elevator-panel.app.window-app .elevator-flavor.rustic .level-btn:hover,
+#elevator-panel.app.window-app .elevator-flavor.rustic .level-btn:focus,
+#elevator-panel.app.window-app .elevator-flavor.rustic .call-btn:hover,
+#elevator-panel.app.window-app .elevator-flavor.rustic .call-btn:focus {
+	background: url("/modules/elevator/images/panels/rustic_02.webp") center / cover no-repeat, var(--button-hover-background-color);
+}
+
+/* Legacy aliases for backward compatibility */
+.elevator-panel.light,
+.elevator-panel.dark {
+	color: inherit;
+	background: transparent;
+	border-radius: 0;
+}
+.elevator-panel.fantasy { --fg: #2b1a10; --bg: #f2ead6; }
 .elevator-config { border: 1px solid var(--color-border, #888); padding: 8px; margin-top: 8px; }
 
