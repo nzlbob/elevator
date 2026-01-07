@@ -43,9 +43,38 @@
 	display: flex;
 	justify-content: center;
 	width: 100%;
+	gap: 6px;
+	align-items: center;
 }
 .elevator-panel .level-btn {
 	text-align: center;
+}
+
+/* Locked state: red outline + red text (theme-aware)
+
+	NOTE: Foundry applies ID-specific button styling for this app:
+	`#elevator-panel.app.window-app button { border: 1px solid var(--button-border-color); color: var(--button-text-color); ... }`
+	So we both (a) increase specificity and (b) set the button theme variables.
+*/
+#elevator-panel.app.window-app button.locked,
+#elevator-panel.app.window-app .elevator-panel button.locked {
+	--button-border-color: var(--color-border-negative, var(--color-border-danger, #b71c1c));
+	--button-text-color: var(--color-text-negative, var(--color-text-danger, #b71c1c));
+	--button-hover-border-color: var(--color-border-negative, var(--color-border-danger, #b71c1c));
+	--button-hover-text-color: var(--color-text-negative, var(--color-text-danger, #b71c1c));
+
+	border-color: var(--color-border-negative, var(--color-border-danger, #b71c1c)) !important;
+	color: var(--color-text-negative, var(--color-text-danger, #b71c1c)) !important;
+}
+
+#elevator-panel.app.window-app button.locked:hover,
+#elevator-panel.app.window-app button.locked:focus {
+	border-color: var(--color-border-negative, var(--color-border-danger, #b71c1c)) !important;
+	color: var(--color-text-negative, var(--color-text-danger, #b71c1c)) !important;
+}
+
+#elevator-panel.app.window-app button.level-btn.locked {
+	border-width: 2px;
 }
 .elevator-panel:not(.default) button { padding: 6px 10px; }
 

@@ -11,6 +11,15 @@ const LEGACY_SOCKET = {
   currentLevelChanged: `${SOCKET_CHANNEL}.currentLevelChanged`,
 };
 
+const SOCKET_MSG = {
+  panToTokens: "panToTokens",
+};
+
+const SFX = {
+  teleportChime: `modules/${MOD_ID}/sounds/elevator-chime.mp3`,
+  accessDenied: `modules/${MOD_ID}/sounds/access_denied.mp3`
+};
+
 function makeRequestId() {
   try {
     const id = foundry?.utils?.randomID?.();
@@ -65,7 +74,8 @@ function clampNumber(n, min, max) {
 // World store for current elevator level per elevatorId
 const WORLD_STATE = {
   CurrentLevelByElevatorId: "currentLevelByElevatorId",
-  ElevatorLinksById: "elevatorLinksById"
+  ElevatorLinksById: "elevatorLinksById",
+  ElevatorLocksById: "elevatorLocksById"
 };
 
 const REGION_LABEL_SPACING = " \u21D2 "; // Rightwards Double Arrow
@@ -73,8 +83,58 @@ const REGION_LABEL_SPACING = " \u21D2 "; // Rightwards Double Arrow
 // Players cannot update world settings, and the replication of a world-setting change can lag a tick.
 // Keep an optimistic client-side cache so the panel can update immediately.
 const CLIENT_STATE = {
-  currentLevelByElevatorId: {}
+  currentLevelByElevatorId: {},
+  locksByElevatorId: {},
+  pendingPanBySceneId: {}
 };
+
+function normalizeElevatorLockState(state) {
+  const s = (state && typeof state === "object") ? state : {};
+  const globalLocked = !!s.globalLocked;
+  const lockedUuidsRaw = (s.lockedUuids && typeof s.lockedUuids === "object") ? s.lockedUuids : {};
+  const lockedUuids = {};
+  for (const [k, v] of Object.entries(lockedUuidsRaw)) {
+    const uuid = String(k ?? "").trim();
+    if (!uuid) continue;
+    if (v) lockedUuids[uuid] = true;
+  }
+  return { globalLocked, lockedUuids };
+}
+
+function getElevatorLocksById() {
+  try {
+    const raw = game.settings.get(MOD_ID, WORLD_STATE.ElevatorLocksById) || {};
+    return (raw && typeof raw === "object") ? raw : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function setElevatorLocksById(next) {
+  if (!game.user?.isGM) return;
+  const n = (next && typeof next === "object") ? next : {};
+  await game.settings.set(MOD_ID, WORLD_STATE.ElevatorLocksById, n);
+}
+
+function getKnownElevatorLocks(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return normalizeElevatorLockState({});
+
+  const cached = CLIENT_STATE.locksByElevatorId?.[elevId];
+  if (cached) return normalizeElevatorLockState(cached);
+
+  const byId = getElevatorLocksById();
+  return normalizeElevatorLockState(byId?.[elevId] || {});
+}
+
+function isElevatorOrLevelLocked(elevatorId, levelUuid) {
+  const elevId = String(elevatorId ?? "").trim();
+  const lvl = String(levelUuid ?? "").trim();
+  if (!elevId || !lvl) return false;
+  const locks = getKnownElevatorLocks(elevId);
+  if (locks.globalLocked) return true;
+  return !!locks.lockedUuids?.[lvl];
+}
 
 function getKnownCurrentLevelUuid(elevatorId) {
   const elevId = String(elevatorId ?? "").trim();
@@ -103,6 +163,14 @@ function requestSyncCurrentLevel(elevatorId) {
   game.socket.emit(SOCKET_CHANNEL, { type: "getCurrentLevel", requestId, elevatorId: elevId, requester: game.user?.id });
   // Backward compatibility for clients still listening on per-event channels.
   game.socket.emit(LEGACY_SOCKET.getCurrentLevel, { requestId, elevatorId: elevId, requester: game.user?.id });
+}
+
+function requestSyncElevatorLocks(elevatorId) {
+  const elevId = String(elevatorId ?? "").trim();
+  if (!elevId) return;
+  if (game.user?.isGM) return;
+  const requestId = makeRequestId();
+  game.socket.emit(SOCKET_CHANNEL, { type: "getLocks", requestId, elevatorId: elevId, requester: game.user?.id });
 }
 
 async function requestSetCurrentLevel(elevatorId, regionUuid) {
@@ -266,6 +334,25 @@ async function playDoorSfxAndWait() {
     }
   } catch (e) {
     // Never block teleportation due to SFX.
+  }
+}
+
+function playTeleportChime() {
+  try {
+    if (!game.settings.get(MOD_ID, SETTINGS.SfxEnabled)) return;
+    // Best-effort: don't block game flow.
+    playOneShotSfxAndWait(SFX.teleportChime, { volume: 0.8, fallbackMs: 1200 });
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function playAccessDeniedSfx() {
+  try {
+    if (!game.settings.get(MOD_ID, SETTINGS.SfxEnabled)) return;
+    playOneShotSfxAndWait(SFX.accessDenied, { volume: 0.8, fallbackMs: 900 });
+  } catch (e) {
+    /* ignore */
   }
 }
 
@@ -528,6 +615,217 @@ function tokenCenterPointPx(tokenDoc, gridSizePx) {
   };
 }
 
+function getActiveOwnerUserIdsForToken(tokenDoc) {
+  try {
+    const ownerIds = getActorOwnerUserIds(tokenDoc?.actor);
+    return ownerIds.filter(uid => !!game.users?.get?.(uid)?.active);
+  } catch (e) {
+    return [];
+  }
+}
+
+function buildPanPayloadForTokens(tokenDocs, { destRegionUuid = "", destSceneId = "", playChime = true } = {}) {
+  const tokens = Array.isArray(tokenDocs) ? tokenDocs.filter(Boolean) : [];
+  if (!tokens.length) return null;
+
+  const inferredSceneId = String(tokens?.[0]?.parent?.id ?? "").trim();
+  const targetSceneId = String(destSceneId || inferredSceneId || "").trim();
+
+  const userIdSet = new Set();
+  const tokenEntries = [];
+
+  for (const td of tokens) {
+    const sceneId = String(targetSceneId || td?.parent?.id || "").trim();
+    if (!sceneId) continue;
+    const tokenId = String(td?.id ?? "").trim();
+    const actorUuid = String(td?.actor?.uuid ?? "").trim();
+
+    // Only include tokenId if it's for the destination scene (cross-scene teleports often create a new token).
+    const includeTokenId = String(td?.parent?.id ?? "").trim() === sceneId && !!tokenId;
+    if (!includeTokenId && !actorUuid) continue;
+
+    tokenEntries.push({ sceneId, tokenId: includeTokenId ? tokenId : "", actorUuid });
+    for (const uid of getActiveOwnerUserIdsForToken(td)) userIdSet.add(String(uid));
+  }
+
+  const userIds = Array.from(userIdSet).filter(Boolean);
+  if (!tokenEntries.length || !userIds.length) return null;
+
+  return {
+    type: SOCKET_MSG.panToTokens,
+    requestId: makeRequestId(),
+    userIds,
+    tokens: tokenEntries,
+    destRegionUuid: String(destRegionUuid || "").trim(),
+    destSceneId: String(targetSceneId || "").trim(),
+    playChime: playChime !== false
+  };
+}
+
+async function emitPanToOwnersForTokens(tokenDocs, { destRegionDoc = null, playChime = true } = {}) {
+  try {
+    const destRegionUuid = destRegionDoc?.uuid || "";
+    const destSceneId = String(destRegionDoc?.parent?.id ?? "").trim();
+    const payload = buildPanPayloadForTokens(tokenDocs, { destRegionUuid, destSceneId, playChime });
+    if (!payload) return;
+    game.socket.emit(SOCKET_CHANNEL, payload);
+  } catch (e) {
+    // best-effort
+  }
+}
+
+function queuePendingPan(data) {
+  try {
+    const now = Date.now();
+    const entries = Array.isArray(data?.tokens) ? data.tokens : [];
+    for (const entry of entries) {
+      const sceneId = String(entry?.sceneId ?? "").trim();
+      if (!sceneId) continue;
+
+      const prev = CLIENT_STATE.pendingPanBySceneId?.[sceneId];
+      const prevTokens = Array.isArray(prev?.tokens) ? prev.tokens : [];
+      const merged = [...prevTokens, entry];
+
+      // Dedupe by (tokenId|actorUuid)
+      const seen = new Set();
+      const deduped = [];
+      for (const t of merged) {
+        const tid = String(t?.tokenId ?? "").trim();
+        const au = String(t?.actorUuid ?? "").trim();
+        const key = `${tid}::${au}`;
+        if (key === "::") continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push({ sceneId, tokenId: tid, actorUuid: au });
+      }
+
+      CLIENT_STATE.pendingPanBySceneId[sceneId] = {
+        type: SOCKET_MSG.panToTokens,
+        requestId: String(data?.requestId ?? "").trim() || makeRequestId(),
+        userIds: Array.isArray(data?.userIds) ? data.userIds : [],
+        tokens: deduped,
+        destRegionUuid: String(data?.destRegionUuid ?? "").trim(),
+        destSceneId: String(data?.destSceneId ?? sceneId).trim(),
+        playChime: data?.playChime !== false,
+        expiresAt: now + 20000
+      };
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function flushPendingPanForCurrentScene() {
+  try {
+    const sceneId = String(canvas?.scene?.id ?? "").trim();
+    if (!sceneId) return;
+    const pending = CLIENT_STATE.pendingPanBySceneId?.[sceneId];
+    if (!pending) return;
+    const exp = Number(pending?.expiresAt ?? 0);
+    if (exp && Date.now() > exp) {
+      delete CLIENT_STATE.pendingPanBySceneId[sceneId];
+      return;
+    }
+    const didPan = await tryPanToOwnedTeleportedToken(pending);
+    if (didPan) delete CLIENT_STATE.pendingPanBySceneId[sceneId];
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function tryPanToOwnedTeleportedToken(data) {
+  try {
+    const myId = String(game.user?.id ?? "").trim();
+    if (!myId) return;
+
+    const allowed = Array.isArray(data?.userIds) ? data.userIds.map(String) : [];
+    if (allowed.length && !allowed.includes(myId)) return;
+
+    const entries = Array.isArray(data?.tokens) ? data.tokens : [];
+    if (!entries.length) return;
+
+    const currentSceneId = String(canvas?.scene?.id ?? "").trim();
+    if (!currentSceneId) return;
+
+    // If this message is for a different scene, queue it and let canvasReady flush.
+    const allOtherScene = entries.every(e => String(e?.sceneId ?? "").trim() && String(e?.sceneId ?? "").trim() !== currentSceneId);
+    if (allOtherScene) {
+      queuePendingPan(data);
+      return false;
+    }
+
+    const OWNER = CONST?.DOCUMENT_OWNERSHIP_LEVELS?.OWNER ?? 3;
+    const user = game.users?.get?.(myId);
+    const canOwnActor = (actor) => {
+      try {
+        if (!actor || !user) return false;
+        if (actor?.testUserPermission) return !!actor.testUserPermission(user, OWNER);
+        const ownership = actor?.ownership || {};
+        const lvl = Number(ownership?.[myId] ?? ownership?.default ?? 0);
+        return lvl >= OWNER;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    const attemptPanToTokenDoc = async (tokenDoc) => {
+      try {
+        const grid = getGridSizePxForScene(tokenDoc?.parent);
+        const pt = tokenCenterPointPx(tokenDoc, grid);
+        if (!canvas?.animatePan) return;
+        const scale = Number(canvas?.stage?.scale?.x);
+        const panData = { x: pt.x, y: pt.y, duration: 400 };
+        if (Number.isFinite(scale) && scale > 0) panData.scale = scale;
+        await canvas.animatePan(panData);
+      } catch (e) {
+        /* ignore */
+      }
+    };
+
+    // Retry briefly: token placeables can lag behind document updates.
+    const delays = [0, 100, 300, 600];
+    for (const waitMs of delays) {
+      if (waitMs) await new Promise(r => setTimeout(r, waitMs));
+
+      // Prefer tokens in the currently viewed scene.
+      for (const entry of entries) {
+        const sceneId = String(entry?.sceneId ?? "").trim();
+        const tokenId = String(entry?.tokenId ?? "").trim();
+        const actorUuid = String(entry?.actorUuid ?? "").trim();
+        if (!sceneId || !tokenId) continue;
+        if (sceneId !== currentSceneId) continue;
+
+        const tokenDoc = canvas?.scene?.tokens?.get?.(tokenId);
+        if (!tokenDoc) continue;
+        if (!canOwnActor(tokenDoc?.actor)) continue;
+
+        await attemptPanToTokenDoc(tokenDoc);
+        if (data?.playChime !== false) playTeleportChime();
+        return true;
+      }
+
+      // Fallback: cross-scene teleport where tokenId changed. Resolve by actorUuid.
+      for (const entry of entries) {
+        const sceneId = String(entry?.sceneId ?? "").trim();
+        const actorUuid = String(entry?.actorUuid ?? "").trim();
+        if (!sceneId || !actorUuid) continue;
+        if (sceneId !== currentSceneId) continue;
+
+        const tokenDocs = Array.from(canvas?.scene?.tokens || []);
+        const match = tokenDocs.find(td => String(td?.actor?.uuid ?? "").trim() === actorUuid && canOwnActor(td?.actor));
+        if (!match) continue;
+
+        await attemptPanToTokenDoc(match);
+        if (data?.playChime !== false) playTeleportChime();
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    /* ignore */
+  }
+}
+
 function isTokenOwnedByUser(tokenDoc, userId) {
   const uid = String(userId ?? "").trim();
   const user = uid ? game.users?.get?.(uid) : null;
@@ -547,15 +845,40 @@ function isTokenOwnedByUser(tokenDoc, userId) {
 function getElevatorOverlayRoot() {
   const controls = canvas.controls;
   if (!controls) return null;
-  if (controls.elevatorOverlayRoot) return controls.elevatorOverlayRoot;
+
   // Ensure zIndex sorting is honored
   controls.sortableChildren = true;
+
+  const bringToFront = (child) => {
+    try {
+      const parent = child?.parent;
+      if (!parent?.children?.length) return;
+      const idx = parent.children.indexOf(child);
+      if (idx < 0) return;
+      parent.setChildIndex(child, parent.children.length - 1);
+    } catch (e) { /* ignore */ }
+  };
+
+  if (controls.elevatorOverlayRoot) {
+    const root = controls.elevatorOverlayRoot;
+    try {
+      root.sortableChildren = true;
+      // Very high zIndex so it stays above Region visuals in Controls.
+      root.zIndex = 999999;
+      root.eventMode = root.eventMode || "passive";
+      bringToFront(root);
+    } catch (e) { /* ignore */ }
+    return root;
+  }
+
   const root = new PIXI.Container();
   root.sortableChildren = true;
-  root.zIndex = 10000;
+  // Very high zIndex so it stays above Region visuals in Controls.
+  root.zIndex = 999999;
   root.eventMode = "passive";
   root.name = `${MOD_ID}.overlayRoot`;
   controls.addChild(root);
+  bringToFront(root);
   controls.elevatorOverlayRoot = root;
   return root;
 }
@@ -706,6 +1029,7 @@ async function ensureElevatorOverlay(region) {
   // Ensure the container can receive pointer hits even if the region itself handles events.
   container.interactiveChildren = true;
   container.visible = false; // only visible when tokens present
+  // Keep it above other children within the overlay root.
   container.zIndex = 1000;
   container.name = `${MOD_ID}.regionOverlay.${region.document.id}`;
 
@@ -752,10 +1076,27 @@ function updateOverlayVisibility(region) {
     // Only show/interact in Token controls mode. In Region controls/edit mode,
     // clicks are intended for region selection/editing.
     const tokensLayerActive = !!canvas.tokens?.active;
-    if (!tokensLayerActive) {
+    const regionsLayerActive = !!canvas.regions?.active;
+    const gmViewingRegions = !!game.user?.isGM && regionsLayerActive && !tokensLayerActive;
+
+    if (!tokensLayerActive && !gmViewingRegions) {
       if (region.elevatorOverlay) {
         region.elevatorOverlay.visible = false;
         region.elevatorOverlay.eventMode = "none";
+      }
+      return;
+    }
+
+    // GM convenience: when Regions controls are active, show elevator icons.
+    // Keep them above Region visuals so they can be clicked if desired.
+    if (gmViewingRegions) {
+      if (region.elevatorOverlay) {
+        region.elevatorOverlay.visible = true;
+        region.elevatorOverlay.eventMode = "static";
+        region.elevatorOverlay.cursor = "pointer";
+      }
+      for (const child of region.elevatorOverlay?.children || []) {
+        if (child instanceof PIXI.Sprite) child.visible = true;
       }
       return;
     }
@@ -846,6 +1187,7 @@ class ElevatorPanel extends Application {
 
     // Players may have stale world-setting state; ask the GM for the current elevator location.
     try { requestSyncCurrentLevel(this.flags.elevatorId); } catch (e) { /* ignore */ }
+    try { requestSyncElevatorLocks(this.flags.elevatorId); } catch (e) { /* ignore */ }
   }
 
   _deriveState() {
@@ -879,6 +1221,8 @@ class ElevatorPanel extends Application {
     const hereUUID = this.region.document.uuid;
     const currentCabUUID = getKnownCurrentLevelUuid(elevId) || (this.flags.isElevatorHere ? hereUUID : "");
 
+    const lockState = getKnownElevatorLocks(elevId);
+
     // The Select Level list should show all levels (including current), and highlight the current.
     const rawStops = Array.isArray(master?.stops)
       ? normalizeStops(master.stops)
@@ -891,7 +1235,8 @@ class ElevatorPanel extends Application {
       uuid: lvl.uuid,
       uuidLabel: uuidToLabel.get(lvl.uuid) || lvl.uuid,
       label: lvl.label || `Level ${i + 1}`,
-      isCurrent: (!!currentCabUUID && lvl.uuid === currentCabUUID) || (!currentCabUUID && lvl.uuid === hereUUID)
+      isCurrent: (!!currentCabUUID && lvl.uuid === currentCabUUID) || (!currentCabUUID && lvl.uuid === hereUUID),
+      isLocked: !!lockState.globalLocked || !!lockState.lockedUuids?.[lvl.uuid]
     }));
 
     // If this Region has a return destination (propagated from another elevator stop),
@@ -903,7 +1248,8 @@ class ElevatorPanel extends Application {
         uuid: returnTo.uuid,
         uuidLabel: uuidToLabel.get(returnTo.uuid) || returnTo.uuid,
         label: returnTo.label || returnTo.name || "Return",
-        isCurrent: !!currentCabUUID && returnTo.uuid === currentCabUUID
+        isCurrent: !!currentCabUUID && returnTo.uuid === currentCabUUID,
+        isLocked: !!lockState.globalLocked || !!lockState.lockedUuids?.[returnTo.uuid]
       });
     }
 
@@ -953,6 +1299,7 @@ class ElevatorPanel extends Application {
       // Apply optional player-flavor styling only to the action layout.
       flavorClass: flavorTheme,
       levels,
+      isGlobalLocked: !!lockState.globalLocked,
       isGM: !!game.user?.isGM,
       editMode: !!this._editMode,
       config: cfg,
@@ -1302,6 +1649,19 @@ class ElevatorPanel extends Application {
     html.find('button[data-action="call"]').on('click', () => this._handleCall());
     html.find('button[data-action="select"]').on('click', ev => this._handleSelect(ev.currentTarget?.dataset?.uuid));
 
+    html.find('button[data-action="toggle-global-lock"]').on('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._handleToggleGlobalLock();
+    });
+
+    html.find('button[data-action="toggle-level-lock"]').on('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const uuid = ev.currentTarget?.dataset?.uuid;
+      this._handleToggleLevelLock(uuid);
+    });
+
     html.find('button[data-action="toggle-edit"]').on('click', () => {
       if (!game.user?.isGM) return;
       this._editMode = !this._editMode;
@@ -1485,16 +1845,24 @@ class ElevatorPanel extends Application {
 
   async _handleSelect(destUUID) {
     if (!destUUID) return ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.noDestination`));
-    const dest = await fromUuid(destUUID);
-    if (!(dest instanceof RegionDocument)) return ui.notifications.error(game.i18n.localize(`${MOD_ID}.error.invalidDestination`));
-
-    const destLabel = `${dest.parent?.name || ""}${REGION_LABEL_SPACING}${dest.name || ""}`.trim();
 
     // If selecting the current stop, do nothing.
     if (destUUID === this.region.document.uuid) {
       this._elevatorState = this._deriveState();
       return this.render(true);
     }
+
+    // Lockout check (global or per-level) before any teleport / SFX.
+    if (isElevatorOrLevelLocked(this.flags.elevatorId, destUUID)) {
+      playAccessDeniedSfx();
+      ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.levelLocked`) || "That level is locked.");
+      return;
+    }
+
+    const dest = await fromUuid(destUUID);
+    if (!(dest instanceof RegionDocument)) return ui.notifications.error(game.i18n.localize(`${MOD_ID}.error.invalidDestination`));
+
+    const destLabel = `${dest.parent?.name || ""}${REGION_LABEL_SPACING}${dest.name || ""}`.trim();
 
     const tokens = tokensInsideRegion(this.region);
     if (!tokens.length) return ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.noTokensInRegion`));
@@ -1535,15 +1903,26 @@ class ElevatorPanel extends Application {
     } catch (e) { /* ignore */ }
 
     // Owned tokens: teleport locally
+    const teleportedOwned = [];
     for (const t of owned) {
       try {
-        if (typeof dest.teleportToken === "function") await dest.teleportToken(t);
+        if (typeof dest.teleportToken === "function") {
+          await dest.teleportToken(t);
+          // Best-effort: use the token doc we have (usually updated in-place).
+          teleportedOwned.push(t);
+        }
         else throw new Error("Destination region has no teleportToken method");
       } catch (e) {
         warn("Teleport failed", t, e);
         ui.notifications.warn(game.i18n.localize(`${MOD_ID}.warn.teleportUnavailable`) || "Teleport unavailable for this destination.");
       }
     }
+
+    // Ensure all owning users (including non-initiators) recenter on their teleported tokens.
+    // This matters especially when a GM teleports player-owned tokens.
+    try {
+      if (teleportedOwned.length) await emitPanToOwnersForTokens(teleportedOwned, { destRegionDoc: dest });
+    } catch (e) { /* ignore */ }
 
     // Non-owned tokens: request GM/owner approval
     // IMPORTANT: A player may not be able to see hidden/unowned tokens (so we can't enumerate them).
@@ -1614,6 +1993,49 @@ class ElevatorPanel extends Application {
         return;
       }
     } catch (e) { /* ignore */ }
+  }
+
+  async _handleToggleGlobalLock() {
+    if (!game.user?.isGM) return;
+    const elevId = String(this.flags?.elevatorId ?? "").trim();
+    if (!elevId) return;
+
+    const byId = foundry.utils.duplicate(getElevatorLocksById());
+    const cur = normalizeElevatorLockState(byId?.[elevId] || {});
+    const next = { ...cur, globalLocked: !cur.globalLocked };
+    byId[elevId] = next;
+
+    await setElevatorLocksById(byId);
+
+    // Broadcast for immediate client updates.
+    const requestId = makeRequestId();
+    CLIENT_STATE.locksByElevatorId[elevId] = next;
+    game.socket.emit(SOCKET_CHANNEL, { type: "locksChanged", requestId, elevatorId: elevId, locks: next });
+    queueRerenderOpenElevatorPanels(elevId);
+  }
+
+  async _handleToggleLevelLock(levelUuid) {
+    if (!game.user?.isGM) return;
+    const elevId = String(this.flags?.elevatorId ?? "").trim();
+    const uuid = String(levelUuid ?? "").trim();
+    if (!elevId || !uuid) return;
+
+    const byId = foundry.utils.duplicate(getElevatorLocksById());
+    const cur = normalizeElevatorLockState(byId?.[elevId] || {});
+    const lockedUuids = { ...(cur.lockedUuids || {}) };
+    lockedUuids[uuid] = !lockedUuids[uuid];
+    if (!lockedUuids[uuid]) delete lockedUuids[uuid];
+
+    const next = { ...cur, lockedUuids };
+    byId[elevId] = next;
+
+    await setElevatorLocksById(byId);
+
+    // Broadcast for immediate client updates.
+    const requestId = makeRequestId();
+    CLIENT_STATE.locksByElevatorId[elevId] = next;
+    game.socket.emit(SOCKET_CHANNEL, { type: "locksChanged", requestId, elevatorId: elevId, locks: next });
+    queueRerenderOpenElevatorPanels(elevId);
   }
 }
 
@@ -1730,6 +2152,18 @@ function registerSocket() {
       return;
     }
 
+    // GM/owner -> targeted owners: recenter view on teleported tokens
+    if (type === SOCKET_MSG.panToTokens) {
+      // If we're not on the destination scene yet, queue and let canvasReady flush.
+      const didPan = await tryPanToOwnedTeleportedToken(data);
+      if (!didPan) {
+        const destSceneId = String(data?.destSceneId ?? "").trim();
+        const curSceneId = String(canvas?.scene?.id ?? "").trim();
+        if (destSceneId && curSceneId && destSceneId !== curSceneId) queuePendingPan(data);
+      }
+      return;
+    }
+
     // Player -> GM: update world state
     if (type === "setCurrentLevel") {
       if (!game.user?.isGM) return;
@@ -1773,6 +2207,23 @@ function registerSocket() {
       return;
     }
 
+    // Player -> GM: request lock state
+    if (type === "getLocks") {
+      if (!game.user?.isGM) return;
+      try {
+        const elevId = String(data?.elevatorId ?? "").trim();
+        if (!elevId) return;
+        const byId = getElevatorLocksById();
+        const locks = normalizeElevatorLockState(byId?.[elevId] || {});
+        dlog("GM getLocks", { elevId, locks, requester: data?.requester });
+        const requestId = String(data?.requestId ?? "").trim() || makeRequestId();
+        game.socket.emit(SOCKET_CHANNEL, { type: "locksChanged", requestId, elevatorId: elevId, locks });
+      } catch (e) {
+        warn("Socket getLocks error", e);
+      }
+      return;
+    }
+
     // GM -> everyone: state broadcast
     if (type === "currentLevelChanged") {
       try {
@@ -1784,6 +2235,19 @@ function registerSocket() {
         queueRerenderOpenElevatorPanels(elevId);
       } catch (e) {
         warn("Socket currentLevelChanged error", e);
+      }
+    }
+
+    if (type === "locksChanged") {
+      try {
+        const elevId = String(data?.elevatorId ?? "").trim();
+        if (!elevId) return;
+        const locks = normalizeElevatorLockState(data?.locks || {});
+        dlog("locksChanged", { elevId, locks, user: game.user?.name });
+        CLIENT_STATE.locksByElevatorId[elevId] = locks;
+        queueRerenderOpenElevatorPanels(elevId);
+      } catch (e) {
+        warn("Socket locksChanged error", e);
       }
     }
 
@@ -1851,12 +2315,16 @@ function registerChatApprovals() {
             const approverId = game.user?.id;
             const isGM = !!game.user?.isGM;
             const approvedTokenUUIDs = [];
+            const approvedTokenDocsPre = [];
             for (const tUUID of tokenUUIDs) {
               try {
                 const tokenEntity = await fromUuid(tUUID);
                 const tokenDoc = tokenEntity?.document ?? tokenEntity;
                 if (!tokenDoc) continue;
                 if (!isGM && !isTokenOwnedByUser(tokenDoc, approverId)) continue;
+
+                // Capture doc for ownership mapping (best-effort); post-teleport it may no longer resolve.
+                approvedTokenDocsPre.push(tokenDoc);
                 await gmTeleportTokenToRegion(dest, tUUID);
                 approvedTokenUUIDs.push(tUUID);
               } catch (e) {
@@ -1868,6 +2336,11 @@ function registerChatApprovals() {
               try { ui.notifications?.warn?.(game.i18n.localize(`${MOD_ID}.warn.noTokensApprovable`)); } catch (e) { /* ignore */ }
               return;
             }
+
+            // Recenter for any owning users whose tokens were teleported (best-effort).
+            try {
+              if (approvedTokenDocsPre.length) await emitPanToOwnersForTokens(approvedTokenDocsPre, { destRegionDoc: dest });
+            } catch (e) { /* ignore */ }
 
             // Also persist elevator location if we know the elevator id.
             try {
@@ -2118,6 +2591,14 @@ function registerSettings() {
     default: {},
     config: false
   });
+
+  game.settings.register(MOD_ID, WORLD_STATE.ElevatorLocksById, {
+    name: game.i18n.localize(`${MOD_ID}.settings.locksState.name`) || "Elevator Locks",
+    scope: "world",
+    type: Object,
+    default: {},
+    config: false
+  });
 }
 
 Hooks.on("init", () => {
@@ -2154,6 +2635,7 @@ Hooks.once('canvasInit', () => {
   Hooks.on("refreshToken", onRefreshToken);
   // Layer switching can change whether the icon should be clickable/visible.
   Hooks.on("canvasReady", refreshAllElevatorOverlays);
+  Hooks.on("canvasReady", flushPendingPanForCurrentScene);
   Hooks.on("activateCanvasLayer", refreshAllElevatorOverlays);
   Hooks.on("sightRefresh", queueOverlayRefresh);
   log("Canvas init, hooks registered");

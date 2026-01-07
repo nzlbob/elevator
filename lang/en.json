@@ -25,13 +25,17 @@
 			"bulkAddTitle": "Add Regions",
 			"bulkAddHint": "Select one or more Regions to add as elevator stops.",
 			"bulkAddConfirm": "Add Selected"
+			,
+			"lockAll": "Lock/Unlock All Levels",
+			"lockLevel": "Lock/Unlock This Level"
 		},
 		"warn": {
 			"noElevatorId": "Elevator ID not set on this Region.",
 			"noDestination": "No destination selected.",
 			"noTokensInRegion": "No tokens in the elevator Region.",
 			"noTokensApprovable": "No tokens you can approve.",
-			"teleportUnavailable": "Teleport unavailable for this destination."
+			"teleportUnavailable": "Teleport unavailable for this destination.",
+			"levelLocked": "That level is locked."
 		},
 		"info": {
 			"waitNextRound": "Waiting until next round to enable elevator...",
@@ -77,6 +81,9 @@
 			},
 			"linksState": {
 				"name": "Elevator Links"
+			},
+			"locksState": {
+				"name": "Elevator Locks"
 			}
 		},
 		"regionConfig": {
