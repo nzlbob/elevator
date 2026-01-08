@@ -529,18 +529,60 @@ async function syncElevatorNetwork(elevatorId, { homeUuid } = {}) {
       theme: master.theme,
       iconSrc: master.iconSrc,
       iconSize: master.iconSize,
-      iconAlwaysOn: !!master.iconAlwaysOn,
+      iconAlwaysOn: master?.iconAlwaysOn === undefined ? true : !!master.iconAlwaysOn,
       levels: otherStops,
       returnTo: home && home !== stop.uuid ? { uuid: home, label: homeLabel } : null
     }, { inplace: false });
 
     const updateData = { [`flags.${MOD_ID}`]: nextFlags };
     if (stop.doc.name !== desiredName) updateData.name = desiredName;
-    await stop.doc.update(updateData);
+    await stop.doc.update(updateData, { elevatorSync: true });
 
     // If teleportToken behaviors exist, force their destinations to remain within the elevator network.
     // (Single-destination behavior in v13/easy-regions.)
     await restrictTeleportBehaviorsToNetwork(stop.doc, allowedSet, home);
+  }
+}
+
+async function syncElevatorNetworkFromRegionDocument(regionDoc) {
+  try {
+    if (!game.user?.isGM) return;
+    if (!(regionDoc instanceof RegionDocument)) return;
+
+    const flags = getElevatorFlags(regionDoc);
+    const enabled = !!flags.enabled;
+    const elevatorId = String(flags.elevatorId ?? "").trim();
+    if (!enabled || !elevatorId) return;
+
+    const currentUuid = String(regionDoc.uuid ?? "").trim();
+    if (!currentUuid) return;
+
+    const iconAlwaysOn = (flags.iconAlwaysOn === undefined) ? true : !!flags.iconAlwaysOn;
+    const iconSrc = String(flags.iconSrc ?? "").trim() || "modules/elevator/images/interface.webp";
+    const iconSize = Number.isFinite(flags.iconSize) ? flags.iconSize : 48;
+    const theme = normalizeThemeValue(flags.theme || DEFAULTS.theme);
+
+    const stops = normalizeStops([
+      { uuid: currentUuid, label: regionDoc.name },
+      ...(Array.isArray(flags.levels) ? flags.levels : [])
+    ]);
+    if (!stops.length) return;
+
+    const linksById = foundry.utils.duplicate(getElevatorLinksById());
+    linksById[elevatorId] = {
+      elevatorId,
+      homeUuid: currentUuid,
+      iconSrc,
+      iconSize,
+      iconAlwaysOn,
+      theme,
+      stops
+    };
+
+    await setElevatorLinksById(linksById);
+    await syncElevatorNetwork(elevatorId, { homeUuid: currentUuid });
+  } catch (e) {
+    warn("syncElevatorNetworkFromRegionDocument error", e);
   }
 }
 
@@ -881,6 +923,47 @@ function getElevatorOverlayRoot() {
   bringToFront(root);
   controls.elevatorOverlayRoot = root;
   return root;
+}
+
+function destroyElevatorOverlayRoot() {
+  try {
+    const controls = canvas?.controls;
+    const root = controls?.elevatorOverlayRoot;
+    if (!controls || !root) return;
+
+    try {
+      if (root.parent) root.parent.removeChild(root);
+    } catch (e) { /* ignore */ }
+
+    try {
+      root.destroy({ children: true });
+    } catch (e) { /* ignore */ }
+
+    try {
+      controls.elevatorOverlayRoot = null;
+    } catch (e) { /* ignore */ }
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function rebuildElevatorOverlaysForCurrentScene() {
+  try {
+    // Scene switches can reuse the Controls layer; ensure we don't carry overlays forward.
+    destroyElevatorOverlayRoot();
+
+    const regionDocs = canvas?.scene?.regions || [];
+    for (const regionDoc of regionDocs) {
+      if (!isElevatorEnabled(regionDoc)) continue;
+      const regionObj = regionDoc?.object;
+      if (!regionObj) continue;
+      await ensureElevatorOverlay(regionObj);
+    }
+
+    refreshAllElevatorOverlays();
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 function isPointVisibleToUser(pt) {
@@ -2415,6 +2498,7 @@ function renderRegionConfig(doc, html) {
       isElevatorHere: new fields.BooleanField({ initial: false, label: `${PREFIX}.isHere.label`, hint: `${PREFIX}.isHere.hint` }),
       iconSrc: new fields.FilePathField({ categories: ["IMAGE"], label: `${PREFIX}.icon.label`, hint: `${PREFIX}.icon.hint` }),
       iconSize: new fields.NumberField({ integer: true, min: 24, initial: 48, label: `${PREFIX}.iconSize.label`, hint: `${PREFIX}.iconSize.hint` }),
+      iconAlwaysOn: new fields.BooleanField({ initial: true, label: `${PREFIX}.iconAlwaysOn.label`, hint: `${PREFIX}.iconAlwaysOn.hint` }),
       theme: new fields.StringField({ initial: DEFAULTS.theme, label: `${PREFIX}.theme.label`, hint: `${PREFIX}.theme.hint`, choices: { default: "Default", scifi: "Sci-Fi", horror: "Horror", rustic: "Rustic" } }),
       returnTo: new fields.SchemaField({
         uuid: new fields.DocumentUUIDField({ type: "Region" }),
@@ -2437,6 +2521,11 @@ function renderRegionConfig(doc, html) {
     group.append(schema.fields.isElevatorHere.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.isElevatorHere }));
     group.append(schema.fields.iconSrc.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.iconSrc }));
     group.append(schema.fields.iconSize.toFormGroup({ localize: true }, { value: doc.document.flags?.[MOD_ID]?.iconSize }));
+    {
+      const stored = doc.document.flags?.[MOD_ID]?.iconAlwaysOn;
+      const value = (stored === undefined) ? true : stored;
+      group.append(schema.fields.iconAlwaysOn.toFormGroup({ localize: true }, { value }));
+    }
     group.append(schema.fields.theme.toFormGroup({ localize: true }, { value: normalizeThemeValue(doc.document.flags?.[MOD_ID]?.theme || DEFAULTS.theme) }));
 
     // Return destination (optional)
@@ -2493,12 +2582,33 @@ async function refreshRegion(region, options) {
 function updateRegion(document, changed, options, userId) {
   const region = document.object;
   if (!region) return;
-  if (changed.flags?.[MOD_ID]) {
-    // Rebuild overlay on flag changes
+
+  const flagChanged = !!changed.flags?.[MOD_ID];
+  const geometryChanged = (
+    changed?.shapes !== undefined
+    || changed?.shape !== undefined
+    || changed?.polygon !== undefined
+    || changed?.polygons !== undefined
+    || changed?.points !== undefined
+    || changed?.x !== undefined
+    || changed?.y !== undefined
+    || changed?.width !== undefined
+    || changed?.height !== undefined
+    || changed?.rotation !== undefined
+  );
+
+  if (flagChanged || geometryChanged) {
+    // Rebuild overlay on flag OR geometry changes so icon follows landing region edits.
     try {
       if (region.elevatorOverlay) { region.elevatorOverlay.destroy({ children: true }); region.elevatorOverlay = null; }
       ensureElevatorOverlay(region);
     } catch (e) { warn("updateRegion rebuild overlay error", e); }
+  }
+
+  // If the elevator is configured via Region config (instead of the panel),
+  // sync the elevator network so every stop gets updated/enabled.
+  if (game.user?.isGM && flagChanged && !options?.elevatorSync) {
+    Promise.resolve().then(() => syncElevatorNetworkFromRegionDocument(document));
   }
 }
 
@@ -2634,7 +2744,7 @@ Hooks.once('canvasInit', () => {
   Hooks.on("updateToken", onUpdateToken);
   Hooks.on("refreshToken", onRefreshToken);
   // Layer switching can change whether the icon should be clickable/visible.
-  Hooks.on("canvasReady", refreshAllElevatorOverlays);
+  Hooks.on("canvasReady", rebuildElevatorOverlaysForCurrentScene);
   Hooks.on("canvasReady", flushPendingPanForCurrentScene);
   Hooks.on("activateCanvasLayer", refreshAllElevatorOverlays);
   Hooks.on("sightRefresh", queueOverlayRefresh);

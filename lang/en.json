@@ -110,6 +110,10 @@
 				"label": "Icon Size",
 				"hint": "Pixel size for the elevator icon."
 			},
+			"iconAlwaysOn": {
+				"label": "Show Icon Always",
+				"hint": "If enabled, always show the elevator icon on this Region (not only when tokens are inside)."
+			},
 			"theme": {
 				"label": "Panel Theme",
 				"hint": "Theme for the elevator panel at this Region."
